@@ -70,7 +70,7 @@ app.post("/api/transcribe", upload.single("audio"), async (req, res) => {
       file: fs.createReadStream(req.file.path),
       model: "whisper-large-v3-turbo",
       response_format: "verbose_json",
-      timestamp_granularities: ["segment"]
+      timestamp_granularities: ["word", "segment"]
     });
 
     res.json({
@@ -78,7 +78,8 @@ app.post("/api/transcribe", upload.single("audio"), async (req, res) => {
       text: result.text,
       language: result.language,
       duration: result.duration,
-      segments: result.segments
+      segments: result.segments,
+      words: result.words || []
     });
 
   } catch (error) {
