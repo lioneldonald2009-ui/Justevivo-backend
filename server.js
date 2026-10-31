@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import multer from "multer";
 import fs from "fs";
+import path from "path";
 import Groq from "groq-sdk";
 import dotenv from "dotenv";
 
@@ -13,8 +14,19 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+const UPLOAD_DIR = "/tmp/justevivo-uploads/";
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination: UPLOAD_DIR,
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase() || ".mp4";
+    cb(null, `${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`);
+  }
+});
+
 const upload = multer({
-  dest: "/tmp/justevivo-uploads/",
+  storage,
   limits: { fileSize: 25 * 1024 * 1024 }
 });
 
@@ -40,6 +52,14 @@ app.post("/api/transcribe", upload.single("audio"), async (req, res) => {
       error: "Veuillez envoyer un fichier audio ou vidéo."
     });
   }
+
+  console.log(
+    "Fichier reçu :",
+    req.file.originalname,
+    req.file.mimetype,
+    req.file.size,
+    "octets"
+  );
 
   try {
     const groq = new Groq({
