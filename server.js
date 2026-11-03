@@ -17,6 +17,8 @@ const ALLOWED = (process.env.ALLOWED_ORIGINS || "https://lioneldonald2009-ui.git
   .map(s => s.trim())
   .filter(Boolean);
 
+const SITE_URL = process.env.SITE_URL || "https://lioneldonald2009-ui.github.io/Justevivo/";
+
 app.set("trust proxy", 1);
 app.use(cors({
   origin(origin, cb) {
@@ -39,6 +41,16 @@ const PLANS = {
   business: { name: "Business", videos: 110, maxSeconds: 1800, gen: 200 }
 };
 
+// ===== Paiement (FedaPay) =====
+const FEDA_KEY = process.env.FEDAPAY_SECRET_KEY || "";
+const FEDA_BASE = (process.env.FEDAPAY_ENV || "sandbox").toLowerCase() === "live"
+  ? "https://api.fedapay.com/v1"
+  : "https://sandbox-api.fedapay.com/v1";
+const PAY_ON = ACCOUNTS_ON && Boolean(FEDA_KEY);
+
+// Prix pour 30 jours, en francs CFA (1 $ ≈ 600 F)
+const PRICES_XOF = { starter: 5400, pro: 12000, business: 22800 };
+
 function fmtLimit(sec) {
   return sec >= 60 ? Math.round(sec / 60) + " min" : sec + " s";
 }
@@ -60,6 +72,15 @@ async function sbInsert(table, row, prefer) {
   const r = await fetch(SB_URL + "/rest/v1/" + table, {
     method: "POST",
     headers: sbHeaders({ Prefer: prefer || "return=minimal" }),
+    body: JSON.stringify(row)
+  });
+  if (!r.ok) throw new Error("base de données " + r.status);
+}
+
+async function sbPatch(pathAndQuery, row) {
+  const r = await fetch(SB_URL + "/rest/v1/" + pathAndQuery, {
+    method: "PATCH",
+    headers: sbHeaders({ Prefer: "return=minimal" }),
     body: JSON.stringify(row)
   });
   if (!r.ok) throw new Error("base de données " + r.status);
@@ -122,8 +143,9 @@ async function getAccount(userId) {
   }
 
   let plan = rows[0].plan;
+  let planUntil = rows[0].plan_until || null;
   if (!PLANS[plan]) plan = "free";
-  if (rows[0].plan_until && new Date(rows[0].plan_until).getTime() < Date.now()) plan = "free";
+  if (planUntil && new Date(planUntil).getTime() < Date.now()) plan = "free";
 
   const now = new Date();
   const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
@@ -142,7 +164,99 @@ async function getAccount(userId) {
     encodeURIComponent(dayStart) + "&select=id&limit=2000"
   );
 
-  return { plan, limits: PLANS[plan], jobs, generatedToday: gens.length };
+  return { plan, planUntil, limits: PLANS[plan], jobs, generatedToday: gens.length };
+}
+
+// ===== FedaPay : appels et vérification des paiements =====
+async function fedaCall(method, pathname, body) {
+  const r = await fetch(FEDA_BASE + pathname, {
+    method,
+    headers: { Authorization: "Bearer " + FEDA_KEY, "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+
+  let data = {};
+  try {
+    data = await r.json();
+  } catch (e) { /* réponse vide */ }
+
+  if (!r.ok) {
+    throw new Error("FedaPay " + r.status + " " + (data.message || ""));
+  }
+  return data;
+}
+
+// FedaPay range parfois l'objet sous une clé du type « v1/transaction »
+function unwrap(obj) {
+  if (obj && typeof obj === "object") {
+    for (const k of Object.keys(obj)) {
+      if (k.indexOf("v1/") === 0 && obj[k] && typeof obj[k] === "object") return obj[k];
+    }
+  }
+  return obj || {};
+}
+
+function findKey(obj, key) {
+  if (!obj || typeof obj !== "object") return undefined;
+  if (typeof obj[key] === "string") return obj[key];
+  for (const k of Object.keys(obj)) {
+    const v = findKey(obj[k], key);
+    if (v) return v;
+  }
+  return undefined;
+}
+
+// Vérifie un paiement auprès de FedaPay et active la formule (30 jours)
+async function settleOne(userId, txId) {
+  const tx = unwrap(await fedaCall("GET", "/transactions/" + txId));
+  if (String(tx.status) !== "approved") return false;
+
+  let meta = tx.custom_metadata || {};
+  if (typeof meta === "string") {
+    try { meta = JSON.parse(meta); } catch (e) { meta = {}; }
+  }
+
+  const plan = String(meta.plan || "");
+  if (meta.user_id !== userId || !PLANS[plan] || plan === "free" || !PRICES_XOF[plan]) return false;
+  if (Number(tx.amount) < PRICES_XOF[plan]) return false;
+
+  const acct = await getAccount(userId);
+  const now = Date.now();
+  const base = acct.plan === plan && acct.planUntil && new Date(acct.planUntil).getTime() > now
+    ? new Date(acct.planUntil).getTime()
+    : now;
+  const until = new Date(base + 30 * 86400000).toISOString();
+
+  await sbPatch("profiles?user_id=eq." + userId, { plan, plan_until: until });
+  await sbInsert("usage", { user_id: userId, job_id: "tx" + txId, kind: "payment", seconds: 0 });
+  return true;
+}
+
+// Regarde les paiements commencés dans les 3 derniers jours et active ceux qui sont approuvés
+async function settlePayments(userId) {
+  if (!PAY_ON) return;
+
+  const since = encodeURIComponent(new Date(Date.now() - 3 * 86400000).toISOString());
+
+  const pending = await sbGet(
+    "usage?user_id=eq." + userId + "&kind=eq.pay_pending&created_at=gte." + since + "&select=job_id&limit=10"
+  );
+  if (!pending.length) return;
+
+  const done = await sbGet(
+    "usage?user_id=eq." + userId + "&kind=eq.payment&created_at=gte." + since + "&select=job_id&limit=50"
+  );
+  const doneSet = new Set(done.map(d => d.job_id));
+
+  const todo = pending.map(p => p.job_id).filter(j => !doneSet.has(j)).slice(0, 3);
+
+  for (const ref of todo) {
+    try {
+      await settleOne(userId, ref.slice(2));
+    } catch (e) {
+      console.error("Erreur de paiement", ref, "-", e.message);
+    }
+  }
 }
 
 // ===== Limite de demandes par personne =====
@@ -204,7 +318,11 @@ app.get("/", (req, res) => {
 
 // Configuration publique pour la connexion
 app.get("/api/config", (req, res) => {
-  res.json(ACCOUNTS_ON ? { enabled: true, url: SB_URL, anonKey: SB_ANON } : { enabled: false });
+  res.json(
+    ACCOUNTS_ON
+      ? { enabled: true, url: SB_URL, anonKey: SB_ANON, payments: PAY_ON }
+      : { enabled: false }
+  );
 });
 
 // Compte de la personne connectée
@@ -212,12 +330,22 @@ app.get("/api/me", requireUser, async (req, res) => {
   if (!req.user) return res.json({ enabled: false });
 
   try {
+    if (PAY_ON) {
+      try {
+        await settlePayments(req.user.id);
+      } catch (e) {
+        console.error("Erreur de vérification des paiements :", e.message);
+      }
+    }
+
     const a = await getAccount(req.user.id);
     res.json({
       enabled: true,
+      payments: PAY_ON,
       email: req.user.email,
       plan: a.plan,
       planName: a.limits.name,
+      planUntil: a.plan === "free" ? null : a.planUntil,
       videosLimit: a.limits.videos,
       videosUsed: a.jobs.size,
       maxSeconds: a.limits.maxSeconds,
@@ -229,6 +357,56 @@ app.get("/api/me", requireUser, async (req, res) => {
     res.status(503).json({ error: "Impossible de lire votre compte pour le moment." });
   }
 });
+
+// Début d'un paiement : crée la transaction et renvoie le lien de paiement
+app.post(
+  "/api/me/pay/create",
+  limit("pay", 10, 10 * 60 * 1000),
+  requireUser,
+  async (req, res) => {
+    if (!PAY_ON || !req.user) {
+      return res.status(503).json({ error: "Le paiement en ligne n'est pas encore activé." });
+    }
+
+    const plan = String((req.body && req.body.plan) || "").toLowerCase();
+    if (!PRICES_XOF[plan]) {
+      return res.status(400).json({ error: "Formule inconnue." });
+    }
+
+    try {
+      const created = unwrap(await fedaCall("POST", "/transactions", {
+        description: "Abonnement JUSTEVIVO " + PLANS[plan].name + " (30 jours)",
+        amount: PRICES_XOF[plan],
+        currency: { iso: "XOF" },
+        callback_url: SITE_URL + "?pay=return",
+        customer: { email: req.user.email },
+        custom_metadata: { user_id: req.user.id, plan }
+      }));
+
+      const id = created.id;
+      if (!id) throw new Error("transaction sans identifiant");
+
+      const tok = await fedaCall("POST", "/transactions/" + id + "/token", {});
+      const url = findKey(tok, "url");
+
+      if (!url || url.indexOf("https://") !== 0) {
+        throw new Error("lien de paiement introuvable");
+      }
+
+      await sbInsert("usage", {
+        user_id: req.user.id,
+        job_id: "tx" + id,
+        kind: "pay_pending",
+        seconds: 0
+      });
+
+      res.json({ success: true, id, url });
+    } catch (e) {
+      console.error("Erreur de création du paiement :", e.message);
+      res.status(500).json({ error: "Impossible de lancer le paiement pour le moment. Réessayez." });
+    }
+  }
+);
 
 // ===== Transcription =====
 app.post(
@@ -529,5 +707,8 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`JUSTEVIVO fonctionne sur le port ${PORT} (comptes : ${ACCOUNTS_ON ? "activés" : "désactivés"})`);
+  console.log(
+    `JUSTEVIVO fonctionne sur le port ${PORT} (comptes : ${ACCOUNTS_ON ? "activés" : "désactivés"}, ` +
+    `paiement : ${PAY_ON ? "activé (" + (FEDA_BASE.includes("sandbox") ? "test" : "réel") + ")" : "désactivé"})`
+  );
 });
