@@ -27,7 +27,7 @@ app.use(cors({
 }));
 // Les lots de sous-titres peuvent dépasser 20 Ko (jusqu’à 300 segments).
 // La limite reste bornée pour éviter les payloads JSON excessifs.
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "10mb" }));
 
 // ===== Comptes (Supabase) =====
 const SB_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
@@ -54,10 +54,10 @@ function isAdminUser(user) {
 
 // Formules : vidéos par mois, durée maximale (secondes), générateurs par jour
 const PLANS = {
-  free: { name: "Gratuit", videos: 3, maxSeconds: 60, gen: 10 },
-  starter: { name: "Starter", videos: 25, maxSeconds: 300, gen: 50 },
-  pro: { name: "Pro", videos: 50, maxSeconds: 600, gen: 100 },
-  business: { name: "Business", videos: 110, maxSeconds: 1800, gen: 200 }
+  free: { name: "Gratuit", videos: 3, maxSeconds: 3600, gen: 10 },
+  starter: { name: "Starter", videos: 25, maxSeconds: 3600, gen: 50 },
+  pro: { name: "Pro", videos: 50, maxSeconds: 3600, gen: 100 },
+  business: { name: "Business", videos: 110, maxSeconds: 3600, gen: 200 }
 };
 
 // ===== Paiement (FedaPay) =====
@@ -586,7 +586,7 @@ app.post(
     // Les vidéos longues peuvent générer bien plus de 300 lignes de sous-titres.
     // La limite est relevée, tandis que le traitement reste découpé en petits lots
     // pour éviter les prompts trop volumineux auprès du fournisseur IA.
-    if (!input.length || input.length > 3000) {
+    if (!input.length || input.length > 12000) {
       return res.status(400).json({
         error: "Cette vidéo contient trop de segments pour une seule traduction (maximum 3 000).",
         code: "TOO_MANY_SEGMENTS"
