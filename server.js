@@ -55,8 +55,8 @@ function isAdminUser(user) {
 // Formules : vidéos par mois, durée maximale (secondes), générateurs par jour
 const PLANS = {
   free: { name: "Gratuit", videos: 3, maxSeconds: 60, gen: 10 },
-  starter: { name: "Starter", videos: 25, maxSeconds: 120, gen: 50 },
-  pro: { name: "Pro", videos: 50, maxSeconds: 300, gen: 100 },
+  starter: { name: "Starter", videos: 25, maxSeconds: 300, gen: 50 },
+  pro: { name: "Pro", videos: 50, maxSeconds: 600, gen: 100 },
   business: { name: "Business", videos: 110, maxSeconds: 1800, gen: 200 }
 };
 
