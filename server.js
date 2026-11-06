@@ -11,6 +11,9 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Health check for Render; does not expose secrets or account data.
+app.get("/health", (_req, res) => res.status(200).json({ ok: true, service: "JUSTEVIVO", timestamp: new Date().toISOString() }));
+
 // Sites autorisés à utiliser le serveur
 const ALLOWED = (process.env.ALLOWED_ORIGINS || "https://lioneldonald2009-ui.github.io")
   .split(",")
@@ -20,6 +23,8 @@ const ALLOWED = (process.env.ALLOWED_ORIGINS || "https://lioneldonald2009-ui.git
 const SITE_URL = process.env.SITE_URL || "https://lioneldonald2009-ui.github.io/Justevivo/";
 
 app.set("trust proxy", 1);
+app.disable("x-powered-by");
+app.use((_req, res, next) => { res.setHeader("X-Content-Type-Options", "nosniff"); res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin"); res.setHeader("X-Frame-Options", "DENY"); next(); });
 app.use(cors({
   origin(origin, cb) {
     cb(null, !origin || ALLOWED.includes(origin));
@@ -27,8 +32,7 @@ app.use(cors({
 }));
 // Les lots de sous-titres peuvent dépasser 20 Ko (jusqu’à 300 segments).
 // La limite reste bornée pour éviter les payloads JSON excessifs.
-// Payload borne pour les lots de sous-titres de vidéos longues.
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "1mb" }));
 
 // ===== Comptes (Supabase) =====
 const SB_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
@@ -587,7 +591,7 @@ app.post(
     // Les vidéos longues peuvent générer bien plus de 300 lignes de sous-titres.
     // La limite est relevée, tandis que le traitement reste découpé en petits lots
     // pour éviter les prompts trop volumineux auprès du fournisseur IA.
-    if (!input.length || input.length > 12000) {
+    if (!input.length || input.length > 3000) {
       return res.status(400).json({
         error: "Cette vidéo contient trop de segments pour une seule traduction (maximum 3 000).",
         code: "TOO_MANY_SEGMENTS"
