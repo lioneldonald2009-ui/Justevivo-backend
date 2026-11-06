@@ -27,6 +27,7 @@ app.use(cors({
 }));
 // Les lots de sous-titres peuvent dépasser 20 Ko (jusqu’à 300 segments).
 // La limite reste bornée pour éviter les payloads JSON excessifs.
+// Payload borne pour les lots de sous-titres de vidéos longues.
 app.use(express.json({ limit: "10mb" }));
 
 // ===== Comptes (Supabase) =====
@@ -54,10 +55,10 @@ function isAdminUser(user) {
 
 // Formules : vidéos par mois, durée maximale (secondes), générateurs par jour
 const PLANS = {
-  free: { name: "Gratuit", videos: 3, maxSeconds: 3600, gen: 10 },
-  starter: { name: "Starter", videos: 25, maxSeconds: 3600, gen: 50 },
-  pro: { name: "Pro", videos: 50, maxSeconds: 3600, gen: 100 },
-  business: { name: "Business", videos: 110, maxSeconds: 3600, gen: 200 }
+  free: { name: "Gratuit", videos: 3, maxSeconds: 60, gen: 10 },
+  starter: { name: "Starter", videos: 25, maxSeconds: 300, gen: 50 },
+  pro: { name: "Pro", videos: 50, maxSeconds: 600, gen: 100 },
+  business: { name: "Business", videos: 110, maxSeconds: 1800, gen: 200 }
 };
 
 // ===== Paiement (FedaPay) =====
