@@ -1,3 +1,6 @@
 node_modules/
 .env
-uploads/
+.env.*
+!.env.example
+npm-debug.log*
+.DS_Store
