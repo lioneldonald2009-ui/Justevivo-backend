@@ -33,7 +33,18 @@ app.use(express.json({ limit: "1mb" }));
 const SB_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SB_ANON = process.env.SUPABASE_ANON_KEY || "";
 const SB_SERVICE = process.env.SUPABASE_SERVICE_KEY || "";
-const ACCOUNTS_ON = Boolean(SB_URL && SB_ANON && SB_SERVICE);
+
+// Sécurité : le backend ne démarre jamais si Supabase n'est pas entièrement configuré.
+// Cela évite d'ouvrir les fonctions IA et les quotas en mode invité par erreur.
+const missingSupabaseConfig = [];
+if (!SB_URL) missingSupabaseConfig.push("SUPABASE_URL");
+if (!SB_ANON) missingSupabaseConfig.push("SUPABASE_ANON_KEY");
+if (!SB_SERVICE) missingSupabaseConfig.push("SUPABASE_SERVICE_KEY");
+if (missingSupabaseConfig.length) {
+  console.error("Configuration Supabase incomplète. Variables manquantes : " + missingSupabaseConfig.join(", "));
+  process.exit(1);
+}
+const ACCOUNTS_ON = true;
 // L'administrateur est identifié uniquement à partir de l'email vérifié par Supabase.
 const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || "").trim().toLowerCase();
 function isAdminUser(user) {
@@ -96,11 +107,13 @@ async function sbPatch(pathAndQuery, row) {
 
 const userCache = new Map();
 
-// Vérifie la connexion de la personne (si les comptes sont activés)
+// Vérifie obligatoirement la connexion de la personne.
 async function requireUser(req, res, next) {
+  // Défense en profondeur : aucun accès invité si la configuration est désactivée.
   if (!ACCOUNTS_ON) {
-    req.user = null;
-    return next();
+    return res.status(503).json({
+      error: "Le service de comptes est indisponible. Réessayez plus tard."
+    });
   }
 
   const h = String(req.headers.authorization || "");
