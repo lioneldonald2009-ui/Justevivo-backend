@@ -25,13 +25,21 @@ app.use(cors({
     cb(null, !origin || ALLOWED.includes(origin));
   }
 }));
-app.use(express.json({ limit: "20kb" }));
+// Les lots de sous-titres peuvent dépasser 20 Ko (jusqu’à 300 segments).
+// La limite reste bornée pour éviter les payloads JSON excessifs.
+app.use(express.json({ limit: "1mb" }));
 
 // ===== Comptes (Supabase) =====
 const SB_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SB_ANON = process.env.SUPABASE_ANON_KEY || "";
 const SB_SERVICE = process.env.SUPABASE_SERVICE_KEY || "";
 const ACCOUNTS_ON = Boolean(SB_URL && SB_ANON && SB_SERVICE);
+// L'administrateur est identifié uniquement à partir de l'email vérifié par Supabase.
+const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || "").trim().toLowerCase();
+function isAdminUser(user) {
+  return Boolean(ADMIN_EMAIL && user &&
+    String(user.email || "").trim().toLowerCase() === ADMIN_EMAIL);
+}
 
 // Formules : vidéos par mois, durée maximale (secondes), générateurs par jour
 const PLANS = {
@@ -124,7 +132,7 @@ async function requireUser(req, res, next) {
     }
 
     const u = await r.json();
-    req.user = { id: u.id, email: u.email };
+    req.user = { id: u.id, email: u.email, isAdmin: isAdminUser(u) };
     userCache.set(token, { user: req.user, exp: Date.now() + 60000 });
     next();
   } catch (e) {
@@ -134,7 +142,17 @@ async function requireUser(req, res, next) {
 }
 
 // Formule et consommation d'une personne
-async function getAccount(userId) {
+async function getAccount(userId, userEmail) {
+  if (ADMIN_EMAIL && String(userEmail || "").trim().toLowerCase() === ADMIN_EMAIL) {
+    return {
+      plan: "business",
+      planUntil: null,
+      limits: { name: "Administrateur", videos: 1000000000, maxSeconds: 1000000000, gen: 1000000000 },
+      jobs: new Map(),
+      generatedToday: 0,
+      isAdmin: true
+    };
+  }
   let rows = await sbGet("profiles?user_id=eq." + userId + "&select=plan,plan_until");
 
   if (!rows.length) {
@@ -160,7 +178,7 @@ async function getAccount(userId) {
   used.forEach(u => jobs.set(u.job_id, (jobs.get(u.job_id) || 0) + Number(u.seconds || 0)));
 
   const gens = await sbGet(
-    "usage?user_id=eq." + userId + "&kind=eq.generate&created_at=gte." +
+    "usage?user_id=eq." + userId + "&kind=in.(generate,translate)&created_at=gte." +
     encodeURIComponent(dayStart) + "&select=id&limit=2000"
   );
 
@@ -338,12 +356,13 @@ app.get("/api/me", requireUser, async (req, res) => {
       }
     }
 
-    const a = await getAccount(req.user.id);
+    const a = await getAccount(req.user.id, req.user.email);
     res.json({
       enabled: true,
       payments: PAY_ON,
       email: req.user.email,
-      plan: a.plan,
+      isAdmin: Boolean(a.isAdmin),
+      plan: a.isAdmin ? "admin" : a.plan,
       planName: a.limits.name,
       planUntil: a.plan === "free" ? null : a.planUntil,
       videosLimit: a.limits.videos,
@@ -366,6 +385,10 @@ app.post(
   async (req, res) => {
     if (!PAY_ON || !req.user) {
       return res.status(503).json({ error: "Le paiement en ligne n'est pas encore activé." });
+    }
+
+    if (isAdminUser(req.user)) {
+      return res.status(403).json({ error: "Le compte administrateur bénéficie déjà de tous les accès.", code: "ADMIN" });
     }
 
     const plan = String((req.body && req.body.plan) || "").toLowerCase();
@@ -438,7 +461,7 @@ app.post(
     if (req.user) {
       let account;
       try {
-        account = await getAccount(req.user.id);
+        account = await getAccount(req.user.id, req.user.email);
       } catch (e) {
         cleanup();
         console.error("Erreur de compte :", e.message);
@@ -518,6 +541,110 @@ app.post(
       });
     } finally {
       cleanup();
+    }
+  }
+);
+
+// ===== Traduction des sous-titres : conserve exactement les timings =====
+const SUBTITLE_LANGUAGES = {
+  fr: "français", en: "anglais", es: "espagnol", pt: "portugais",
+  de: "allemand", it: "italien", ar: "arabe", nl: "néerlandais",
+  ru: "russe", zh: "chinois simplifié", ja: "japonais",
+  ko: "coréen", tr: "turc", hi: "hindi", sw: "swahili"
+};
+
+app.post(
+  "/api/translate",
+  limit("translate", 12, 10 * 60 * 1000),
+  requireUser,
+  async (req, res) => {
+    if (!process.env.GROQ_API_KEY) {
+      return res.status(503).json({ error: "La clé API Groq n'est pas configurée." });
+    }
+
+    const body = req.body || {};
+    const targetLanguage = String(body.targetLanguage || "").toLowerCase();
+    const sourceLanguage = String(body.sourceLanguage || "auto").slice(0, 40);
+    const input = Array.isArray(body.segments) ? body.segments : [];
+
+    if (!SUBTITLE_LANGUAGES[targetLanguage]) {
+      return res.status(400).json({ error: "Choisissez une langue de traduction prise en charge." });
+    }
+    if (!input.length || input.length > 300) {
+      return res.status(400).json({ error: "Le nombre de sous-titres doit être compris entre 1 et 300." });
+    }
+    if (input.some(x => !x || typeof x.text !== "string" || x.text.length > 1500)) {
+      return res.status(400).json({ error: "Un ou plusieurs sous-titres sont invalides ou trop longs." });
+    }
+
+    let account = null;
+    if (req.user) {
+      try {
+        account = await getAccount(req.user.id, req.user.email);
+        if (!account.isAdmin && account.generatedToday >= account.limits.gen) {
+          return res.status(403).json({
+            error: "Limite quotidienne de génération atteinte (" + account.limits.gen +
+              "). Revenez demain ou changez de formule.",
+            code: "QUOTA"
+          });
+        }
+      } catch (e) {
+        console.error("Erreur de compte traduction :", e.message);
+        return res.status(503).json({ error: "Impossible de vérifier votre compte." });
+      }
+    }
+
+    try {
+      const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+      const translated = [];
+      // Petits lots pour limiter la taille des requêtes et conserver l'ordre.
+      for (let offset = 0; offset < input.length; offset += 20) {
+        const batch = input.slice(offset, offset + 20);
+        const payload = batch.map((seg, i) => ({ id: i, text: seg.text }));
+        const prompt =
+          "Translate each subtitle into " + SUBTITLE_LANGUAGES[targetLanguage] + ". " +
+          "Source language: " + sourceLanguage + ". " +
+          "Keep meaning, tone, names and numbers. Do not summarize or add explanations. " +
+          "Return ONLY valid JSON in this exact shape: {\"translations\":[{\"id\":0,\"text\":\"...\"}]}. " +
+          "Return exactly one translation for every id, in the same order. Input: " +
+          JSON.stringify(payload);
+        const raw = await askModel(groq, [
+          { role: "system", content: "You are a professional subtitle translator. Output valid JSON only." },
+          { role: "user", content: prompt }
+        ]);
+        const clean = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+        const parsed = JSON.parse(clean);
+        if (!Array.isArray(parsed.translations) || parsed.translations.length !== batch.length) {
+          throw new Error("Réponse de traduction incomplète.");
+        }
+        parsed.translations.forEach((item, i) => {
+          const text = String(item.text || "").trim();
+          if (!text) throw new Error("Une traduction est vide.");
+          translated.push({
+            start: Number(batch[i].start),
+            end: Number(batch[i].end),
+            text
+          });
+        });
+      }
+
+      if (req.user) {
+        try {
+          await sbInsert("usage", {
+            user_id: req.user.id,
+            job_id: "tr" + Date.now(),
+            kind: "translate",
+            seconds: 0
+          });
+        } catch (e) {
+          console.error("Erreur d'enregistrement de traduction :", e.message);
+        }
+      }
+
+      res.json({ success: true, sourceLanguage, targetLanguage, segments: translated });
+    } catch (error) {
+      console.error("Erreur de traduction :", error.message);
+      res.status(500).json({ error: "La traduction des sous-titres a échoué. Réessayez." });
     }
   }
 );
@@ -643,7 +770,7 @@ app.post(
 
     if (req.user) {
       try {
-        const a = await getAccount(req.user.id);
+        const a = await getAccount(req.user.id, req.user.email);
         if (a.generatedToday >= a.limits.gen) {
           return res.status(403).json({
             error: "Limite du jour atteinte (" + a.limits.gen + " générations par jour, formule " +
