@@ -57,7 +57,7 @@ const FEDA_BASE = (process.env.FEDAPAY_ENV || "sandbox").toLowerCase() === "live
 const PAY_ON = ACCOUNTS_ON && Boolean(FEDA_KEY);
 
 // Prix pour 30 jours, en francs CFA (1 $ ≈ 600 F)
-const PRICES_XOF = { starter: 5400, pro: 12000, business: 22800 };
+const PRICES_XOF = { starter: 11400, pro: 18000, business: 28800 };
 
 function fmtLimit(sec) {
   return sec >= 60 ? Math.round(sec / 60) + " min" : sec + " s";
