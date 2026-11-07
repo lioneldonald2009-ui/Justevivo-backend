@@ -25,26 +25,13 @@ app.use(cors({
     cb(null, !origin || ALLOWED.includes(origin));
   }
 }));
-// Les lots de sous-titres peuvent dépasser 20 Ko (jusqu’à 300 segments).
-// La limite reste bornée pour éviter les payloads JSON excessifs.
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "20kb" }));
 
 // ===== Comptes (Supabase) =====
 const SB_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SB_ANON = process.env.SUPABASE_ANON_KEY || "";
 const SB_SERVICE = process.env.SUPABASE_SERVICE_KEY || "";
-
-// Sécurité : le backend ne démarre jamais si Supabase n'est pas entièrement configuré.
-// Cela évite d'ouvrir les fonctions IA et les quotas en mode invité par erreur.
-const missingSupabaseConfig = [];
-if (!SB_URL) missingSupabaseConfig.push("SUPABASE_URL");
-if (!SB_ANON) missingSupabaseConfig.push("SUPABASE_ANON_KEY");
-if (!SB_SERVICE) missingSupabaseConfig.push("SUPABASE_SERVICE_KEY");
-if (missingSupabaseConfig.length) {
-  console.error("Configuration Supabase incomplète. Variables manquantes : " + missingSupabaseConfig.join(", "));
-  process.exit(1);
-}
-const ACCOUNTS_ON = true;
+const ACCOUNTS_ON = Boolean(SB_URL && SB_ANON && SB_SERVICE);
 // L'administrateur est identifié uniquement à partir de l'email vérifié par Supabase.
 const ADMIN_EMAIL = String(process.env.ADMIN_EMAIL || "").trim().toLowerCase();
 function isAdminUser(user) {
@@ -54,10 +41,10 @@ function isAdminUser(user) {
 
 // Formules : vidéos par mois, durée maximale (secondes), générateurs par jour
 const PLANS = {
-  free: { name: "Gratuit", videos: 3, maxSeconds: 3600, gen: 10 },
-  starter: { name: "Starter", videos: 25, maxSeconds: 3600, gen: 50 },
-  pro: { name: "Pro", videos: 50, maxSeconds: 3600, gen: 100 },
-  business: { name: "Business", videos: 110, maxSeconds: 3600, gen: 200 }
+  free: { name: "Gratuit", videos: 3, maxSeconds: 60, gen: 10 },
+  starter: { name: "Starter", videos: 25, maxSeconds: 120, gen: 50 },
+  pro: { name: "Pro", videos: 50, maxSeconds: 300, gen: 100 },
+  business: { name: "Business", videos: 110, maxSeconds: 1800, gen: 200 }
 };
 
 // ===== Paiement (FedaPay) =====
@@ -68,7 +55,7 @@ const FEDA_BASE = (process.env.FEDAPAY_ENV || "sandbox").toLowerCase() === "live
 const PAY_ON = ACCOUNTS_ON && Boolean(FEDA_KEY);
 
 // Prix pour 30 jours, en francs CFA (1 $ ≈ 600 F)
-const PRICES_XOF = { starter: 11400, pro: 18000, business: 28800 };
+const PRICES_XOF = { starter: 5400, pro: 12000, business: 22800 };
 
 function fmtLimit(sec) {
   return sec >= 60 ? Math.round(sec / 60) + " min" : sec + " s";
@@ -107,13 +94,11 @@ async function sbPatch(pathAndQuery, row) {
 
 const userCache = new Map();
 
-// Vérifie obligatoirement la connexion de la personne.
+// Vérifie la connexion de la personne (si les comptes sont activés)
 async function requireUser(req, res, next) {
-  // Défense en profondeur : aucun accès invité si la configuration est désactivée.
   if (!ACCOUNTS_ON) {
-    return res.status(503).json({
-      error: "Le service de comptes est indisponible. Réessayez plus tard."
-    });
+    req.user = null;
+    return next();
   }
 
   const h = String(req.headers.authorization || "");
@@ -583,14 +568,8 @@ app.post(
     if (!SUBTITLE_LANGUAGES[targetLanguage]) {
       return res.status(400).json({ error: "Choisissez une langue de traduction prise en charge." });
     }
-    // Les vidéos longues peuvent générer bien plus de 300 lignes de sous-titres.
-    // La limite est relevée, tandis que le traitement reste découpé en petits lots
-    // pour éviter les prompts trop volumineux auprès du fournisseur IA.
-    if (!input.length || input.length > 12000) {
-      return res.status(400).json({
-        error: "Cette vidéo contient trop de segments pour une seule traduction (maximum 3 000).",
-        code: "TOO_MANY_SEGMENTS"
-      });
+    if (!input.length || input.length > 300) {
+      return res.status(400).json({ error: "Le nombre de sous-titres doit être compris entre 1 et 300." });
     }
     if (input.some(x => !x || typeof x.text !== "string" || x.text.length > 1500)) {
       return res.status(400).json({ error: "Un ou plusieurs sous-titres sont invalides ou trop longs." });
@@ -616,11 +595,9 @@ app.post(
     try {
       const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
       const translated = [];
-      // Traitement séquentiel par petits lots : supporte les transcriptions longues
-      // sans envoyer tous les sous-titres dans un seul prompt.
-      const BATCH_SIZE = 15;
-      for (let offset = 0; offset < input.length; offset += BATCH_SIZE) {
-        const batch = input.slice(offset, offset + BATCH_SIZE);
+      // Petits lots pour limiter la taille des requêtes et conserver l'ordre.
+      for (let offset = 0; offset < input.length; offset += 20) {
+        const batch = input.slice(offset, offset + 20);
         const payload = batch.map((seg, i) => ({ id: i, text: seg.text }));
         const prompt =
           "Translate each subtitle into " + SUBTITLE_LANGUAGES[targetLanguage] + ". " +
@@ -665,10 +642,7 @@ app.post(
       res.json({ success: true, sourceLanguage, targetLanguage, segments: translated });
     } catch (error) {
       console.error("Erreur de traduction :", error.message);
-      const message = /timeout|timed out|rate.?limit|429/i.test(String(error.message || ""))
-        ? "Le service de traduction est temporairement saturé ou trop lent. Réessayez dans quelques instants."
-        : "La traduction des sous-titres a échoué. Vérifiez la connexion puis réessayez.";
-      res.status(502).json({ error: message, code: "TRANSLATION_FAILED" });
+      res.status(500).json({ error: "La traduction des sous-titres a échoué. Réessayez." });
     }
   }
 );
