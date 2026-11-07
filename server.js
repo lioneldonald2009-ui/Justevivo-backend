@@ -25,7 +25,9 @@ app.use(cors({
     cb(null, !origin || ALLOWED.includes(origin));
   }
 }));
-app.use(express.json({ limit: "20kb" }));
+// Les lots de sous-titres peuvent dépasser 20 Ko (jusqu’à 300 segments).
+// La limite reste bornée pour éviter les payloads JSON excessifs.
+app.use(express.json({ limit: "1mb" }));
 
 // ===== Comptes (Supabase) =====
 const SB_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
