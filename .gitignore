@@ -1,3 +1,7 @@
 node_modules/
 .env
+.env.*
+!.env.example
 uploads/
+*.log
+.DS_Store
