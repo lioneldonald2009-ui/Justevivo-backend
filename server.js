@@ -334,9 +334,41 @@ const storage = multer.diskStorage({
   }
 });
 
+// Formats audio/vidéo acceptés par le flux de transcription.
+// Le contrôle porte sur l'extension ET le type MIME déclaré par le navigateur.
+const ALLOWED_MEDIA_EXTENSIONS = new Set([
+  ".mp3", ".wav", ".m4a", ".mp4", ".mpeg", ".mpga",
+  ".ogg", ".webm", ".flac", ".mov", ".avi", ".mkv"
+]);
+const ALLOWED_MEDIA_MIME_PREFIXES = ["audio/", "video/"];
+const ALLOWED_GENERIC_MIME_TYPES = new Set([
+  "application/octet-stream",
+  "application/mp4"
+]);
+
 const upload = multer({
   storage,
-  limits: { fileSize: 25 * 1024 * 1024 }
+  limits: {
+    fileSize: 120 * 1024 * 1024,
+    files: 1,
+    fields: 10,
+    parts: 12
+  },
+  fileFilter(req, file, cb) {
+    const ext = path.extname(String(file.originalname || "")).toLowerCase();
+    const mime = String(file.mimetype || "").toLowerCase();
+    const validExtension = ALLOWED_MEDIA_EXTENSIONS.has(ext);
+    const validMime = ALLOWED_MEDIA_MIME_PREFIXES.some(prefix => mime.startsWith(prefix)) ||
+      ALLOWED_GENERIC_MIME_TYPES.has(mime);
+
+    if (!validExtension || !validMime) {
+      const error = new Error("Format non accepté. Envoyez un fichier audio ou vidéo compatible.");
+      error.code = "UNSUPPORTED_MEDIA_TYPE";
+      return cb(error);
+    }
+
+    cb(null, true);
+  }
 });
 
 // Vérifier que le serveur fonctionne
@@ -847,6 +879,9 @@ app.post(
 
 // Erreurs : réponse claire au lieu d'une page d'erreur
 app.use((err, req, res, next) => {
+  if (err && err.code === "UNSUPPORTED_MEDIA_TYPE") {
+    return res.status(415).json({ error: err.message });
+  }
   if (err && err.code === "LIMIT_FILE_SIZE") {
     return res.status(413).json({ error: "Fichier trop volumineux (25 Mo maximum)." });
   }
