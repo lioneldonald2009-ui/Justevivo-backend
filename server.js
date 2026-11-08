@@ -68,7 +68,7 @@ const FEDA_BASE = (process.env.FEDAPAY_ENV || "sandbox").toLowerCase() === "live
 const PAY_ON = ACCOUNTS_ON && Boolean(FEDA_KEY);
 
 // Prix pour 30 jours, en francs CFA (1 $ ≈ 600 F)
-const PRICES_XOF = { starter: 11400, pro: 18000, business: 28800 };
+const PRICES_XOF = { starter: 6000, pro: 9000, business: 15000 };
 
 function fmtLimit(sec) {
   return sec >= 60 ? Math.round(sec / 60) + " min" : sec + " s";
@@ -349,7 +349,7 @@ const ALLOWED_GENERIC_MIME_TYPES = new Set([
 const upload = multer({
   storage,
   limits: {
-    fileSize: 120 * 1024 * 1024,
+    fileSize: 200 * 1024 * 1024,
     files: 1,
     fields: 10,
     parts: 12
@@ -620,7 +620,7 @@ app.post(
     // pour éviter les prompts trop volumineux auprès du fournisseur IA.
     if (!input.length || input.length > 12000) {
       return res.status(400).json({
-        error: "Cette vidéo contient trop de segments pour une seule traduction (maximum 3 000).",
+        error: "Cette vidéo contient trop de segments pour une seule traduction (maximum 12 000).",
         code: "TOO_MANY_SEGMENTS"
       });
     }
