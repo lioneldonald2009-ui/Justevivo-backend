@@ -931,7 +931,7 @@ app.use((err, req, res, next) => {
     return res.status(415).json({ error: err.message });
   }
   if (err && err.code === "LIMIT_FILE_SIZE") {
-    return res.status(413).json({ error: "Fichier trop volumineux (25 Mo maximum)." });
+    return res.status(413).json({ error: "Fichier trop volumineux (200 Mo maximum)." });
   }
   if (err && err.type === "entity.too.large") {
     return res.status(413).json({ error: "Texte trop long." });
