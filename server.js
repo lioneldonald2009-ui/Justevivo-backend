@@ -145,6 +145,15 @@ async function requireUser(req, res, next) {
     }
 
     const u = await r.json();
+
+    // Défense en profondeur : un compte non confirmé ne peut appeler aucune API privée.
+    if (!u.email_confirmed_at) {
+      return res.status(403).json({
+        error: "Confirmez votre adresse email avant d'utiliser JUSTEVIVO.",
+        code: "AUTH"
+      });
+    }
+
     req.user = { id: u.id, email: u.email, isAdmin: isAdminUser(u) };
     userCache.set(token, { user: req.user, exp: Date.now() + 60000 });
     next();
