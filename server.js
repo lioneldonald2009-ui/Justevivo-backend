@@ -33,6 +33,8 @@ app.use(express.json({ limit: "10mb" }));
 const SB_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SB_ANON = process.env.SUPABASE_ANON_KEY || "";
 const SB_SERVICE = process.env.SUPABASE_SERVICE_KEY || "";
+// Clé publique Cloudflare Turnstile (jamais la clé secrète) transmise au frontend.
+const CAPTCHA_SITE_KEY = String(process.env.SUPABASE_CAPTCHA_SITE_KEY || "").trim();
 
 // Sécurité : le backend ne démarre jamais si Supabase n'est pas entièrement configuré.
 // Cela évite d'ouvrir les fonctions IA et les quotas en mode invité par erreur.
@@ -392,7 +394,7 @@ app.get("/", (req, res) => {
 app.get("/api/config", (req, res) => {
   res.json(
     ACCOUNTS_ON
-      ? { enabled: true, url: SB_URL, anonKey: SB_ANON, payments: PAY_ON }
+      ? { enabled: true, url: SB_URL, anonKey: SB_ANON, payments: PAY_ON, captchaSiteKey: CAPTCHA_SITE_KEY }
       : { enabled: false }
   );
 });
