@@ -33,6 +33,8 @@ app.use(express.json({ limit: "10mb" }));
 const SB_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SB_ANON = process.env.SUPABASE_ANON_KEY || "";
 const SB_SERVICE = process.env.SUPABASE_SERVICE_KEY || "";
+// Clé publique Cloudflare Turnstile (jamais la clé secrète) transmise au frontend.
+const CAPTCHA_SITE_KEY = String(process.env.SUPABASE_CAPTCHA_SITE_KEY || "").trim();
 
 // Sécurité : le backend ne démarre jamais si Supabase n'est pas entièrement configuré.
 // Cela évite d'ouvrir les fonctions IA et les quotas en mode invité par erreur.
@@ -145,6 +147,15 @@ async function requireUser(req, res, next) {
     }
 
     const u = await r.json();
+
+    // Défense en profondeur : un compte non confirmé ne peut appeler aucune API privée.
+    if (!u.email_confirmed_at) {
+      return res.status(403).json({
+        error: "Confirmez votre adresse email avant d'utiliser JUSTEVIVO.",
+        code: "AUTH"
+      });
+    }
+
     req.user = { id: u.id, email: u.email, isAdmin: isAdminUser(u) };
     userCache.set(token, { user: req.user, exp: Date.now() + 60000 });
     next();
@@ -383,7 +394,7 @@ app.get("/", (req, res) => {
 app.get("/api/config", (req, res) => {
   res.json(
     ACCOUNTS_ON
-      ? { enabled: true, url: SB_URL, anonKey: SB_ANON, payments: PAY_ON }
+      ? { enabled: true, url: SB_URL, anonKey: SB_ANON, payments: PAY_ON, captchaSiteKey: CAPTCHA_SITE_KEY }
       : { enabled: false }
   );
 });
