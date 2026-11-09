@@ -476,6 +476,41 @@ app.post(
   }
 );
 
+// Correction linguistique légère des segments ASR : conserve les timings et protège les noms propres.
+async function correctTranscriptSegments(groq, segments, language) {
+  if (!Array.isArray(segments) || !segments.length) return segments || [];
+  const corrected = [];
+  const batchSize = 20;
+  for (let offset = 0; offset < segments.length; offset += batchSize) {
+    const batch = segments.slice(offset, offset + batchSize);
+    const payload = batch.map((s, i) => ({ id: i, text: String(s.text || "") }));
+    const prompt =
+      "Corrige uniquement les erreurs manifestes de reconnaissance vocale et d'orthographe dans ces sous-titres. " +
+      "Langue détectée : " + String(language || "auto") + ". " +
+      "N'invente jamais un mot si le contexte ne permet pas de le déterminer. " +
+      "Conserve strictement les noms propres, prénoms, noms de famille, marques, lieux, sigles, nombres et termes spécialisés tels quels. " +
+      "Ne reformule pas, ne résume pas, ne traduis pas et ne change pas le sens ni le registre. " +
+      "Si un passage est incertain, conserve le texte d'origine. " +
+      "Réponds uniquement en JSON : {\"corrections\":[{\"id\":0,\"text\":\"...\"}]}. " +
+      "Retourne exactement une entrée par id, dans le même ordre. Données : " + JSON.stringify(payload);
+    const raw = await askModel(groq, [
+      { role: "system", content: "Tu es un correcteur de transcription fidèle. Tu ne dois jamais inventer ni traduire. JSON uniquement." },
+      { role: "user", content: prompt }
+    ]);
+    const clean = String(raw).replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+    const parsed = JSON.parse(clean);
+    if (!Array.isArray(parsed.corrections) || parsed.corrections.length !== batch.length) {
+      throw new Error("Correction de transcription incomplète.");
+    }
+    parsed.corrections.forEach((item, i) => {
+      const text = typeof item.text === "string" && item.text.trim()
+        ? item.text.trim() : String(batch[i].text || "");
+      corrected.push(Object.assign({}, batch[i], { text }));
+    });
+  }
+  return corrected;
+}
+
 // ===== Transcription =====
 app.post(
   "/api/transcribe",
@@ -571,12 +606,22 @@ app.post(
         }
       }
 
+      let correctedSegments = result.segments || [];
+      let correctedText = result.text || "";
+      // Si la correction IA échoue, la transcription brute reste disponible.
+      try {
+        correctedSegments = await correctTranscriptSegments(groq, correctedSegments, result.language);
+        if (correctedSegments.length) correctedText = correctedSegments.map(s => s.text || "").join(" ").trim();
+      } catch (correctionError) {
+        console.warn("Correction linguistique ignorée, transcription brute conservée :", correctionError.message);
+      }
+
       res.json({
         success: true,
-        text: result.text,
+        text: correctedText,
         language: result.language,
         duration: result.duration,
-        segments: result.segments,
+        segments: correctedSegments,
         words: result.words || []
       });
     } catch (error) {
@@ -657,7 +702,10 @@ app.post(
         const prompt =
           "Translate each subtitle into " + SUBTITLE_LANGUAGES[targetLanguage] + ". " +
           "Source language: " + sourceLanguage + ". " +
-          "Keep meaning, tone, names and numbers. Do not summarize or add explanations. " +
+          "Translate the complete meaning faithfully into the target language, using natural written grammar and spelling, never phonetic transcription or sound imitation. " +
+          "Translate every translatable word; preserve only proper names, personal names, brand names, place names, acronyms and numbers unchanged. " +
+          "Do not leave ordinary source-language words untranslated. Do not transliterate unless required by the target language script. " +
+          "Do not summarize, omit, add explanations or change the meaning, tone or register. " +
           "Return ONLY valid JSON in this exact shape: {\"translations\":[{\"id\":0,\"text\":\"...\"}]}. " +
           "Return exactly one translation for every id, in the same order. Input: " +
           JSON.stringify(payload);
