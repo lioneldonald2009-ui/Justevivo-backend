@@ -241,3 +241,26 @@ export async function enhanceVideoAudio(inputPath, options = {}) {
     throw error;
   }
 }
+
+
+// Exporte un extrait vidéo autonome sans modifier le fichier source.
+export async function renderVideoClip(inputPath, startSeconds, endSeconds) {
+  if (!ffmpegPath) throw new Error("Le moteur FFmpeg n'est pas disponible sur ce serveur.");
+  const start = Number(startSeconds), end = Number(endSeconds);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || end - start < 3 || end - start > 180) {
+    throw new Error("La durée de l'extrait doit être comprise entre 3 et 180 secondes.");
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jv-magic-clip-"));
+  const outputPath = path.join(dir, crypto.randomUUID() + ".mp4");
+  try {
+    await run(ffmpegPath, ["-y", "-hide_banner", "-i", inputPath, "-ss", start.toFixed(3), "-t", (end-start).toFixed(3),
+      "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+      "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", outputPath]);
+    const stat = fs.statSync(outputPath);
+    if (!stat.size) throw new Error("Le clip exporté est vide.");
+    return { outputPath, outputDir: dir, size: stat.size, duration: end-start };
+  } catch (error) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
