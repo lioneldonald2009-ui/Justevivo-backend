@@ -647,7 +647,66 @@ app.post(
   }
 );
 
-// ===== Montage intelligent : suppression des hésitations par transcription horodatée =====\napp.post(\n  "/api/video/remove-fillers",\n  limit("filler-cut", 3, 60 * 60 * 1000),\n  requireUser,\n  upload.single("video"),\n  async (req, res) => {\n    if (!req.file) return res.status(400).json({ error: "Importez une vidéo avant de lancer le nettoyage de la parole." });\n    if (!process.env.GROQ_API_KEY) { fs.unlink(req.file.path, () => {}); return res.status(503).json({ error: "Le moteur de transcription Groq n’est pas configuré." }); }\n    const inputPath = req.file.path;\n    let audio = null;\n    let result = null;\n    try {\n      audio = await extractCompressedAudio(inputPath);\n      const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });\n      const transcription = await groq.audio.transcriptions.create({\n        file: fs.createReadStream(audio.outputPath),\n        model: "whisper-large-v3-turbo",\n        response_format: "verbose_json",\n        timestamp_granularities: ["word"]\n      });\n      const fillerWords = new Set(["euh", "heu", "heuuu", "hum", "hmm", "hm", "uh", "um", "umm", "erm"]);\n      const words = Array.isArray(transcription.words) ? transcription.words : [];\n      const fillers = words.filter(word => {\n        const token = String(word.word || "").toLowerCase().normalize("NFD").replace(/[\\u0300-\\u036f]/g, "").replace(/^[^a-z]+|[^a-z]+$/g, "");\n        return fillerWords.has(token) && Number.isFinite(Number(word.start)) && Number.isFinite(Number(word.end)) && Number(word.end) > Number(word.start);\n      });\n      if (!fillers.length) {\n        fs.unlink(inputPath, () => {});\n        if (audio && audio.outputDir) fs.rm(audio.outputDir, { recursive: true, force: true }, () => {});\n        return res.status(422).json({ error: "Aucune hésitation reconnue (euh, hum, uh…). La vidéo originale n’a pas été modifiée.", code: "NO_FILLERS" });\n      }\n      result = await removeTimeRangesFromVideo(inputPath, fillers.map(word => ({ start: Number(word.start), end: Number(word.end) })), { paddingSeconds: 0.025 });\n      res.set({\n        "X-JV-Original-Duration": String(result.duration),\n        "X-JV-Output-Duration": String(result.keptSeconds),\n        "X-JV-Removed-Duration": String(result.removedSeconds),\n        "X-JV-Detected-Fillers": String(fillers.length),\n        "Content-Type": "video/mp4",\n        "Content-Disposition": "attachment; filename=justevivo-clean-speech.mp4"\n      });\n      res.sendFile(result.outputPath, error => {\n        fs.unlink(inputPath, () => {});\n        if (audio && audio.outputDir) fs.rm(audio.outputDir, { recursive: true, force: true }, () => {});\n        if (result && result.outputDir) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});\n        if (error && !res.headersSent) res.status(500).json({ error: "Impossible de transmettre la vidéo nettoyée." });\n      });\n    } catch (error) {\n      fs.unlink(inputPath, () => {});\n      if (audio && audio.outputDir) fs.rm(audio.outputDir, { recursive: true, force: true }, () => {});\n      if (result && result.outputDir) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});\n      console.error("Erreur nettoyage des hésitations :", error.message);\n      res.status(422).json({ error: "Le nettoyage de la parole a échoué. Vérifiez la vidéo et réessayez.", code: "FILLER_CUT_FAILED" });\n    }\n  }\n);\n\n// ===== Montage intelligent : suppression réelle des silences =====
+// ===== Nettoyage des hésitations et détection des répétitions =====
+app.post("/api/video/remove-fillers", limit("filler-cut", 3, 60 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Importez une vidéo." });
+  if (!process.env.GROQ_API_KEY) { fs.unlink(req.file.path, () => {}); return res.status(503).json({ error: "Le moteur de transcription Groq n’est pas configuré." }); }
+  const inputPath = req.file.path; let audio = null; let result = null;
+  try {
+    audio = await extractCompressedAudio(inputPath);
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const transcription = await groq.audio.transcriptions.create({ file: fs.createReadStream(audio.outputPath), model: "whisper-large-v3-turbo", response_format: "verbose_json", timestamp_granularities: ["word"] });
+    const fillerWords = new Set(["euh", "heu", "heuuu", "hum", "hmm", "hm", "uh", "um", "umm", "erm"]);
+    const fillers = (transcription.words || []).filter(word => { const token = String(word.word || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/^[^a-z]+|[^a-z]+$/g, ""); return fillerWords.has(token) && Number.isFinite(Number(word.start)) && Number.isFinite(Number(word.end)) && Number(word.end) > Number(word.start); });
+    if (!fillers.length) { fs.unlink(inputPath, () => {}); if (audio) fs.rm(audio.outputDir, { recursive: true, force: true }, () => {}); return res.status(422).json({ error: "Aucune hésitation reconnue. La vidéo originale reste intacte.", code: "NO_FILLERS" }); }
+    result = await removeTimeRangesFromVideo(inputPath, fillers.map(w => ({ start: Number(w.start), end: Number(w.end) })), { paddingSeconds: 0.025 });
+    res.set({ "X-JV-Original-Duration": String(result.duration), "X-JV-Output-Duration": String(result.keptSeconds), "X-JV-Removed-Duration": String(result.removedSeconds), "X-JV-Detected-Fillers": String(fillers.length), "Content-Type": "video/mp4", "Content-Disposition": "attachment; filename=justevivo-clean-speech.mp4" });
+    res.sendFile(result.outputPath, () => { fs.unlink(inputPath, () => {}); if (audio) fs.rm(audio.outputDir, { recursive: true, force: true }, () => {}); if (result) fs.rm(result.outputDir, { recursive: true, force: true }, () => {}); });
+  } catch (error) { fs.unlink(inputPath, () => {}); if (audio) fs.rm(audio.outputDir, { recursive: true, force: true }, () => {}); if (result) fs.rm(result.outputDir, { recursive: true, force: true }, () => {}); console.error("Filler cut:", error.message); if (!res.headersSent) res.status(422).json({ error: "Le nettoyage des hésitations a échoué.", code: "FILLER_CUT_FAILED" }); }
+});
+
+// Analyse uniquement : les répétitions sont proposées à l’utilisateur, jamais coupées automatiquement.
+app.post("/api/video/analyze-repetitions", limit("repetition-analysis", 5, 60 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Importez une vidéo." });
+  if (!process.env.GROQ_API_KEY) { fs.unlink(req.file.path, () => {}); return res.status(503).json({ error: "Le moteur de transcription Groq n’est pas configuré." }); }
+  let audio = null;
+  try {
+    audio = await extractCompressedAudio(req.file.path);
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const transcription = await groq.audio.transcriptions.create({ file: fs.createReadStream(audio.outputPath), model: "whisper-large-v3-turbo", response_format: "verbose_json", timestamp_granularities: ["word"] });
+    const words = (transcription.words || []).filter(w => Number.isFinite(Number(w.start)) && Number.isFinite(Number(w.end)) && Number(w.end) > Number(w.start));
+    const normalize = value => String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, "");
+    const candidates = [];
+    for (let i = 1; i < words.length; i++) {
+      const previous = words[i - 1], current = words[i];
+      const a = normalize(previous.word), b = normalize(current.word);
+      const gap = Number(current.start) - Number(previous.end);
+      const duration = Number(previous.end) - Number(previous.start);
+      if (a && a === b && gap >= -0.08 && gap <= 1.15 && duration >= 0.07 && duration <= 1.0) {
+        const from = Math.max(0, i - 4), to = Math.min(words.length, i + 5);
+        candidates.push({ id: "rep-" + candidates.length, start: Number(previous.start), end: Number(previous.end), word: String(previous.word).trim(), repeatedWord: String(current.word).trim(), context: words.slice(from, to).map(w => String(w.word || "").trim()).join(" "), confidence: "à vérifier" });
+      }
+    }
+    res.json({ duration: Number(transcription.duration) || null, candidates, message: candidates.length ? "Vérifiez chaque répétition avant de choisir les coupes." : "Aucune répétition consécutive évidente détectée." });
+  } catch (error) { console.error("Repetition analysis:", error.message); if (!res.headersSent) res.status(422).json({ error: "L’analyse des répétitions a échoué." }); }
+  finally { fs.unlink(req.file.path, () => {}); if (audio) fs.rm(audio.outputDir, { recursive: true, force: true }, () => {}); }
+});
+
+// Applique uniquement les intervalles explicitement sélectionnés dans l’interface.
+app.post("/api/video/apply-repetition-cuts", limit("repetition-cut", 3, 60 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Importez une vidéo." });
+  let result = null;
+  try {
+    let cuts = []; try { cuts = JSON.parse(String(req.body.cuts || "[]")); } catch (_) {}
+    if (!Array.isArray(cuts) || !cuts.length || cuts.length > 100) return res.status(400).json({ error: "Sélectionnez entre 1 et 100 répétitions à retirer." });
+    const valid = cuts.map(x => ({ start: Number(x.start), end: Number(x.end) })).filter(x => Number.isFinite(x.start) && Number.isFinite(x.end) && x.start >= 0 && x.end > x.start && x.end - x.start <= 1.2);
+    if (valid.length !== cuts.length) return res.status(400).json({ error: "Une ou plusieurs coupures sont invalides." });
+    result = await removeTimeRangesFromVideo(req.file.path, valid, { paddingSeconds: 0.035 });
+    res.set({ "X-JV-Original-Duration": String(result.duration), "X-JV-Output-Duration": String(result.keptSeconds), "X-JV-Removed-Duration": String(result.removedSeconds), "X-JV-Detected-Repetitions": String(valid.length), "Content-Type": "video/mp4", "Content-Disposition": "attachment; filename=justevivo-repetition-clean.mp4" });
+    res.sendFile(result.outputPath, () => { fs.unlink(req.file.path, () => {}); if (result) fs.rm(result.outputDir, { recursive: true, force: true }, () => {}); });
+  } catch (error) { fs.unlink(req.file.path, () => {}); if (result) fs.rm(result.outputDir, { recursive: true, force: true }, () => {}); console.error("Repetition cut:", error.message); if (!res.headersSent) res.status(422).json({ error: "Impossible d’appliquer les coupures sélectionnées." }); }
+});
+// ===== Montage intelligent : suppression réelle des silences =====
 app.post(
   "/api/video/remove-silence",
   limit("smart-cut", 3, 60 * 60 * 1000),
