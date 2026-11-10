@@ -703,6 +703,7 @@ app.post("/api/video/analyze-clips", limit("magic-clips-analysis", 4, 60 * 60 * 
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
     const transcript = await groq.audio.transcriptions.create({
       file: fs.createReadStream(audio.outputPath), model: "whisper-large-v3-turbo",
+      ...(req.body && req.body.language ? { language: String(req.body.language).slice(0, 8) } : {}),
       response_format: "verbose_json", timestamp_granularities: ["word", "segment"]
     });
     const words = (transcript.words || []).filter(w => Number.isFinite(Number(w.start)) && Number.isFinite(Number(w.end)) && Number(w.end) > Number(w.start));
