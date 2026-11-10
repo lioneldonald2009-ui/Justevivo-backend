@@ -189,3 +189,23 @@ export async function removeTimeRangesFromVideo(inputPath, intervals, options = 
     throw error;
   }
 }
+
+
+export async function extractCompressedAudio(inputPath) {
+  if (!ffmpegPath) throw new Error("Le moteur FFmpeg n'est pas disponible sur ce serveur.");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jv-audio-"));
+  const outputPath = path.join(dir, crypto.randomUUID() + ".mp3");
+  try {
+    await run(ffmpegPath, [
+      "-y", "-hide_banner", "-i", inputPath, "-vn",
+      "-ac", "1", "-ar", "16000", "-b:a", "48k",
+      "-t", "3600", outputPath
+    ]);
+    const stat = fs.statSync(outputPath);
+    if (!stat.size) throw new Error("Impossible d'extraire la piste audio de cette vidéo.");
+    return { outputPath, outputDir: dir };
+  } catch (error) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
