@@ -119,3 +119,93 @@ export async function removeSilenceFromVideo(inputPath, options = {}) {
     throw error;
   }
 }
+
+
+// Retire des intervalles temporels précis (mots de remplissage détectés par transcription).
+export async function removeTimeRangesFromVideo(inputPath, intervals, options = {}) {
+  if (!ffmpegPath) throw new Error("Le moteur FFmpeg n'est pas disponible sur ce serveur.");
+  const probe = await run(ffmpegPath, ["-hide_banner", "-i", inputPath], 30000).catch(error => {
+    const log = String(error.message || "");
+    if (/Duration:/.test(log)) return log;
+    throw error;
+  });
+  const match = probe.match(/Duration:\\s*(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)/);
+  if (!match) throw new Error("Impossible de lire la durée de cette vidéo.");
+  const duration = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+  if (!Number.isFinite(duration) || duration <= 0 || duration > 3600) throw new Error("La vidéo doit durer moins de 60 minutes.");
+  if (!/Stream #\\d+:\\d+.*Audio:/.test(probe)) throw new Error("Cette vidéo ne contient pas de piste audio.");
+
+  const padding = Math.max(0, Math.min(0.12, Number(options.paddingSeconds) || 0.035));
+  const sorted = (Array.isArray(intervals) ? intervals : [])
+    .map(item => ({
+      start: Math.max(0, Number(item.start) - padding),
+      end: Math.min(duration, Number(item.end) + padding)
+    }))
+    .filter(item => Number.isFinite(item.start) && Number.isFinite(item.end) && item.end - item.start >= 0.02)
+    .sort((a, b) => a.start - b.start);
+  const merged = [];
+  for (const item of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && item.start <= last.end + 0.08) last.end = Math.max(last.end, item.end);
+    else merged.push({ start: item.start, end: item.end });
+  }
+  const keep = [];
+  let cursor = 0;
+  for (const cut of merged) {
+    if (cut.start > cursor + 0.06) keep.push({ start: cursor, end: cut.start });
+    cursor = Math.max(cursor, cut.end);
+  }
+  if (duration > cursor + 0.06) keep.push({ start: cursor, end: duration });
+  if (!merged.length) throw new Error("Aucune hésitation détectée à retirer.");
+  if (!keep.length) throw new Error("Les coupures détectées couvrent toute la vidéo.");
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jv-filler-"));
+  const outputPath = path.join(dir, crypto.randomUUID() + ".mp4");
+  const filters = [];
+  keep.forEach((part, i) => {
+    filters.push("[0:v]trim=start=" + part.start.toFixed(3) + ":end=" + part.end.toFixed(3) + ",setpts=PTS-STARTPTS[v" + i + "]");
+    filters.push("[0:a]atrim=start=" + part.start.toFixed(3) + ":end=" + part.end.toFixed(3) + ",asetpts=PTS-STARTPTS[a" + i + "]");
+  });
+  filters.push(keep.map((_, i) => "[v" + i + "][a" + i + "]").join("") + "concat=n=" + keep.length + ":v=1:a=1[outv][outa]");
+  try {
+    await run(ffmpegPath, [
+      "-y", "-hide_banner", "-i", inputPath,
+      "-filter_complex", filters.join(";"),
+      "-map", "[outv]", "-map", "[outa]",
+      "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+      "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart",
+      outputPath
+    ]);
+    const stat = fs.statSync(outputPath);
+    if (!stat.size) throw new Error("Le fichier vidéo exporté est vide.");
+    const keptSeconds = keep.reduce((sum, part) => sum + part.end - part.start, 0);
+    return {
+      outputPath, outputDir: dir, duration, keptSeconds,
+      removedSeconds: Math.max(0, duration - keptSeconds),
+      removedIntervals: merged.length
+    };
+  } catch (error) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+
+export async function extractCompressedAudio(inputPath) {
+  if (!ffmpegPath) throw new Error("Le moteur FFmpeg n'est pas disponible sur ce serveur.");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jv-audio-"));
+  const outputPath = path.join(dir, crypto.randomUUID() + ".mp3");
+  try {
+    await run(ffmpegPath, [
+      "-y", "-hide_banner", "-i", inputPath, "-vn",
+      "-ac", "1", "-ar", "16000", "-b:a", "48k",
+      "-t", "3600", outputPath
+    ]);
+    const stat = fs.statSync(outputPath);
+    if (!stat.size) throw new Error("Impossible d'extraire la piste audio de cette vidéo.");
+    return { outputPath, outputDir: dir };
+  } catch (error) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
