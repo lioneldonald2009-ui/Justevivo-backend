@@ -4,6 +4,7 @@ import multer from "multer";
 import fs from "fs";
 import path from "path";
 import Groq from "groq-sdk";
+import { removeSilenceFromVideo } from "./video-processing.js";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -642,6 +643,48 @@ app.post(
       });
     } finally {
       cleanup();
+    }
+  }
+);
+
+// ===== Montage intelligent : suppression réelle des silences =====
+app.post(
+  "/api/video/remove-silence",
+  limit("smart-cut", 3, 60 * 60 * 1000),
+  requireUser,
+  upload.single("video"),
+  async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: "Importez une vidéo avant de lancer le montage intelligent." });
+    const inputPath = req.file.path;
+    let result = null;
+    try {
+      const thresholdDb = Number(req.body && req.body.thresholdDb);
+      const minSilenceSeconds = Number(req.body && req.body.minSilenceSeconds);
+      const paddingSeconds = Number(req.body && req.body.paddingSeconds);
+      result = await removeSilenceFromVideo(inputPath, {
+        thresholdDb: Number.isFinite(thresholdDb) ? thresholdDb : -38,
+        minSilenceSeconds: Number.isFinite(minSilenceSeconds) ? minSilenceSeconds : 0.7,
+        paddingSeconds: Number.isFinite(paddingSeconds) ? paddingSeconds : 0.12
+      });
+      res.set({
+        "X-JV-Original-Duration": String(result.duration),
+        "X-JV-Output-Duration": String(result.keptSeconds),
+        "X-JV-Removed-Duration": String(result.removedSeconds),
+        "X-JV-Detected-Silences": String(result.detectedSilences),
+        "Content-Type": "video/mp4",
+        "Content-Disposition": "attachment; filename=justevivo-smart-cut.mp4"
+      });
+      res.sendFile(result.outputPath, error => {
+        fs.unlink(inputPath, () => {});
+        if (result && result.outputDir) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});
+        if (error && !res.headersSent) res.status(500).json({ error: "Impossible de transmettre la vidéo exportée." });
+      });
+    } catch (error) {
+      fs.unlink(inputPath, () => {});
+      if (result && result.outputDir) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});
+      console.error("Erreur montage intelligent :", error.message);
+      const message = /audio|durée|exploitable|FFmpeg|vidéo/i.test(error.message) ? error.message : "Le montage intelligent a échoué. Vérifiez le fichier vidéo puis réessayez.";
+      res.status(422).json({ error: message, code: "SMART_CUT_FAILED" });
     }
   }
 );
