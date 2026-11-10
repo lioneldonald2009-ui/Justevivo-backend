@@ -762,15 +762,17 @@ app.post("/api/video/translate-clips", limit("magic-clips-translation", 12, 60 *
       return res.status(403).json({ error: "Limite quotidienne atteinte (" + account.limits.gen + " opérations IA par jour, formule " + account.limits.name + ").", code: "QUOTA" });
     }
     const languageNames = {fr:"français",en:"anglais",pt:"portugais",es:"espagnol",ja:"japonais",de:"allemand",it:"italien",ar:"arabe",zh:"chinois simplifié",ru:"russe"};
+    const sourceLanguage = String(req.body?.sourceLanguage || "auto").slice(0, 8).toLowerCase();
+    const sourceName = languageNames[sourceLanguage] || "langue originale détectée automatiquement";
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
     const completion = await groq.chat.completions.create({
-      model: "openai/gpt-oss-20b", temperature: 0.1, max_completion_tokens: 4096,
+      model: "openai/gpt-oss-20b", temperature: 0, max_completion_tokens: 6000,
       include_reasoning: false,
-      reasoning_effort: "low",
+      reasoning_effort: "medium",
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: "Tu es un traducteur professionnel de sous-titres vidéo. Traduis chaque texte dans la langue demandée en conservant le sens, le ton oral et la concision. Retourne uniquement un objet JSON avec une propriété candidates, tableau de chaînes dans le même ordre. Ne résume pas et n'ajoute aucune explication." },
-        { role: "user", content: JSON.stringify({ targetLanguage: languageNames[targetLanguage], texts: candidates.map(x => x.text) }) }
+        { role: "system", content: "Tu es un traducteur audiovisuel senior, spécialisé dans les sous-titres naturels et fidèles. Pour chaque élément, produis une vraie traduction dans la langue cible, jamais une translittération ni une répétition du texte source. Comprends le sens avant de traduire. Respecte le contexte, les expressions idiomatiques, les négations, le registre, l'émotion et les noms propres. Ne complète pas les phrases avec des informations inventées. Conserve les nombres, noms, marques et termes techniques. Reformule uniquement pour obtenir une phrase naturelle et concise à l'écran, sans supprimer d'information importante. Si le texte source est déjà dans la langue cible, restitue-le proprement sans le déformer. Chaque entrée doit correspondre exactement à l'entrée de même index. Retourne uniquement un objet JSON valide avec une propriété candidates contenant exactement le même nombre de chaînes, dans le même ordre. Aucun commentaire, aucun numéro, aucune balise." },
+        { role: "user", content: JSON.stringify({ sourceLanguage: sourceName, targetLanguage: languageNames[targetLanguage], instruction: "Traduction fidèle et naturelle pour sous-titres vidéo", texts: candidates.map(x => x.text) }) }
       ]
     });
     const rawTranslation = completion.choices?.[0]?.message?.content || "";
