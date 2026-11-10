@@ -734,6 +734,34 @@ app.post("/api/video/analyze-clips", limit("magic-clips-analysis", 4, 60 * 60 * 
   }
 });
 
+// Traduit les textes des extraits via le modèle de langage Groq.
+app.post("/api/video/translate-clips", limit("magic-clips-translation", 12, 60 * 60 * 1000), requireUser, async (req, res) => {
+  try {
+    if (!process.env.GROQ_API_KEY) return res.status(503).json({ error: "Le moteur de traduction IA n’est pas configuré." });
+    const allowed = new Set(["fr","en","pt","es","ja","de","it","ar","zh","ru"]);
+    const targetLanguage = String(req.body?.targetLanguage || "fr").slice(0, 2).toLowerCase();
+    if (!allowed.has(targetLanguage)) return res.status(400).json({ error: "Langue cible non prise en charge." });
+    const candidates = Array.isArray(req.body?.candidates) ? req.body.candidates.slice(0, 8) : [];
+    if (!candidates.length || candidates.some(x => typeof x.text !== "string" || x.text.length > 6000)) return res.status(400).json({ error: "Aucun texte valide à traduire." });
+    const languageNames = {fr:"français",en:"anglais",pt:"portugais",es:"espagnol",ja:"japonais",de:"allemand",it:"italien",ar:"arabe",zh:"chinois simplifié",ru:"russe"};
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const completion = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile", temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: "Tu es un traducteur professionnel de sous-titres vidéo. Traduis chaque texte dans la langue demandée en conservant le sens, le ton oral et la concision. Retourne uniquement un objet JSON avec une propriété candidates, tableau de chaînes dans le même ordre. Ne résume pas et n'ajoute aucune explication." },
+        { role: "user", content: JSON.stringify({ targetLanguage: languageNames[targetLanguage], texts: candidates.map(x => x.text) }) }
+      ]
+    });
+    const parsed = JSON.parse(completion.choices?.[0]?.message?.content || "{}");
+    if (!Array.isArray(parsed.candidates) || parsed.candidates.length !== candidates.length) throw new Error("La réponse du moteur de traduction est incomplète.");
+    res.json({ success: true, candidates: candidates.map((x,i) => ({ start:Number(x.start)||0, end:Number(x.end)||0, translatedText:String(parsed.candidates[i] || "") })), targetLanguage });
+  } catch (error) {
+    console.error("Magic Clips translation:", error.message);
+    res.status(422).json({ error: "La traduction IA a échoué. Réessayez dans un instant." });
+  }
+});
+
 // Exporte uniquement le passage demandé par l’utilisateur.
 app.post("/api/video/render-clip", limit("magic-clip-render", 10, 60 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "Importez une vidéo." });
