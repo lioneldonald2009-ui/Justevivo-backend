@@ -697,7 +697,12 @@ app.post("/api/video/analyze-clips", limit("magic-clips-analysis", 4, 60 * 60 * 
   if (!req.file) return res.status(400).json({ error: "Importez une vidéo." });
   if (!process.env.GROQ_API_KEY) { fs.unlink(req.file.path, () => {}); return res.status(503).json({ error: "Le moteur Groq n’est pas configuré." }); }
   let audio = null;
+  let account = null;
   try {
+    account = await getAccount(req.user.id, req.user.email);
+    if (account.jobs.size >= account.limits.videos) {
+      return res.status(403).json({ error: "Vous avez atteint le quota mensuel de vidéos de votre formule " + account.limits.name + ".", code: "QUOTA" });
+    }
     const target = Math.max(15, Math.min(60, Number(req.body && req.body.targetSeconds) || 30));
     audio = await extractCompressedAudio(req.file.path);
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -709,6 +714,15 @@ app.post("/api/video/analyze-clips", limit("magic-clips-analysis", 4, 60 * 60 * 
     const words = (transcript.words || []).filter(w => Number.isFinite(Number(w.start)) && Number.isFinite(Number(w.end)) && Number(w.end) > Number(w.start));
     if (!words.length) return res.status(422).json({ error: "Aucune parole exploitable n’a été détectée dans cette vidéo." });
     const duration = Number(transcript.duration) || Number(words[words.length - 1].end);
+    if (duration > account.limits.maxSeconds) {
+      return res.status(403).json({ error: "Cette vidéo dépasse la durée maximale de " + fmtLimit(account.limits.maxSeconds) + " de votre formule " + account.limits.name + ".", code: "DURATION" });
+    }
+    await sbInsert("usage", {
+      user_id: req.user.id,
+      job_id: "mc" + Date.now() + Math.random().toString(36).slice(2, 7),
+      kind: "transcribe",
+      seconds: duration
+    });
     const hooks = /pourquoi|comment|voici|erreur|astuce|secret|jamais|toujours|important|attention|d'abord|premier|meilleur|résultat|conseil|3|trois|5|cinq/i;
     const chunks = [];
     for (let start = 0; start < duration; start += target) {
@@ -743,6 +757,10 @@ app.post("/api/video/translate-clips", limit("magic-clips-translation", 12, 60 *
     if (!allowed.has(targetLanguage)) return res.status(400).json({ error: "Langue cible non prise en charge." });
     const candidates = Array.isArray(req.body?.candidates) ? req.body.candidates.slice(0, 8) : [];
     if (!candidates.length || candidates.some(x => typeof x.text !== "string" || x.text.length > 6000)) return res.status(400).json({ error: "Aucun texte valide à traduire." });
+    const account = await getAccount(req.user.id, req.user.email);
+    if (account.generatedToday >= account.limits.gen) {
+      return res.status(403).json({ error: "Limite quotidienne atteinte (" + account.limits.gen + " opérations IA par jour, formule " + account.limits.name + ").", code: "QUOTA" });
+    }
     const languageNames = {fr:"français",en:"anglais",pt:"portugais",es:"espagnol",ja:"japonais",de:"allemand",it:"italien",ar:"arabe",zh:"chinois simplifié",ru:"russe"};
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
     const completion = await groq.chat.completions.create({
@@ -755,6 +773,12 @@ app.post("/api/video/translate-clips", limit("magic-clips-translation", 12, 60 *
     });
     const parsed = JSON.parse(completion.choices?.[0]?.message?.content || "{}");
     if (!Array.isArray(parsed.candidates) || parsed.candidates.length !== candidates.length) throw new Error("La réponse du moteur de traduction est incomplète.");
+    await sbInsert("usage", {
+      user_id: req.user.id,
+      job_id: "mct" + Date.now() + Math.random().toString(36).slice(2, 7),
+      kind: "translate",
+      seconds: 0
+    });
     res.json({ success: true, candidates: candidates.map((x,i) => ({ start:Number(x.start)||0, end:Number(x.end)||0, translatedText:String(parsed.candidates[i] || "") })), targetLanguage });
   } catch (error) {
     console.error("Magic Clips translation:", error.message);
@@ -1156,7 +1180,7 @@ app.use((err, req, res, next) => {
     return res.status(415).json({ error: err.message });
   }
   if (err && err.code === "LIMIT_FILE_SIZE") {
-    return res.status(413).json({ error: "Fichier trop volumineux (25 Mo maximum)." });
+    return res.status(413).json({ error: "Fichier trop volumineux (200 Mo maximum)." });
   }
   if (err && err.type === "entity.too.large") {
     return res.status(413).json({ error: "Texte trop long." });
