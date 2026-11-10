@@ -32,7 +32,7 @@ function run(binary, args, timeoutMs = 15 * 60 * 1000) {
   });
 }
 
-function parseSilence(log) {
+function parseSilence(log, duration) {
   const events = [];
   const re = /silence_(start|end):\s*([0-9.]+)/g;
   let match;
@@ -73,7 +73,7 @@ export async function removeSilenceFromVideo(inputPath, options = {}) {
     "silencedetect=noise=" + threshold + "dB:d=" + minSilence,
     "-f", "null", "-"
   ]);
-  const detected = parseSilence(silenceLog);
+  const detected = parseSilence(silenceLog, duration);
   const cuts = detected
     .map(s => ({ start: Math.max(0, s.start + padding), end: Math.min(duration, s.end - padding) }))
     .filter(s => s.end - s.start >= 0.12);
