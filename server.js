@@ -4,7 +4,7 @@ import multer from "multer";
 import fs from "fs";
 import path from "path";
 import Groq from "groq-sdk";
-import { removeSilenceFromVideo, removeTimeRangesFromVideo, extractCompressedAudio } from "./video-processing.js";
+import { removeSilenceFromVideo, removeTimeRangesFromVideo, extractCompressedAudio, enhanceVideoAudio } from "./video-processing.js";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -747,6 +747,28 @@ app.post(
     }
   }
 );
+
+// ===== Amélioration audio : réduction de bruit et normalisation =====
+app.post("/api/video/enhance-audio", limit("audio-enhance", 5, 60 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Importez une vidéo." });
+  let result = null;
+  try {
+    result = await enhanceVideoAudio(req.file.path, {
+      denoise: String(req.body.denoise || "true") !== "false",
+      normalize: String(req.body.normalize || "true") !== "false"
+    });
+    res.set({ "Content-Type": "video/mp4", "Content-Disposition": "attachment; filename=justevivo-audio-enhanced.mp4", "X-JV-Audio-Enhanced": "true" });
+    res.sendFile(result.outputPath, () => {
+      fs.unlink(req.file.path, () => {});
+      if (result && result.outputDir) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});
+    });
+  } catch (error) {
+    fs.unlink(req.file.path, () => {});
+    if (result && result.outputDir) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});
+    console.error("Audio enhancement:", error.message);
+    if (!res.headersSent) res.status(422).json({ error: error.message || "L’amélioration audio a échoué." });
+  }
+});
 
 // ===== Traduction des sous-titres : conserve exactement les timings =====
 const SUBTITLE_LANGUAGES = {

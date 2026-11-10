@@ -129,11 +129,11 @@ export async function removeTimeRangesFromVideo(inputPath, intervals, options = 
     if (/Duration:/.test(log)) return log;
     throw error;
   });
-  const match = probe.match(/Duration:\\s*(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)/);
+  const match = probe.match(/Duration:\s*(\d+):(\d+):(\d+(?:\\.\d+)?)/);
   if (!match) throw new Error("Impossible de lire la durée de cette vidéo.");
   const duration = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
   if (!Number.isFinite(duration) || duration <= 0 || duration > 3600) throw new Error("La vidéo doit durer moins de 60 minutes.");
-  if (!/Stream #\\d+:\\d+.*Audio:/.test(probe)) throw new Error("Cette vidéo ne contient pas de piste audio.");
+  if (!/Stream #\d+:\d+.*Audio:/.test(probe)) throw new Error("Cette vidéo ne contient pas de piste audio.");
 
   const padding = Math.max(0, Math.min(0.12, Number(options.paddingSeconds) || 0.035));
   const sorted = (Array.isArray(intervals) ? intervals : [])
@@ -204,6 +204,38 @@ export async function extractCompressedAudio(inputPath) {
     const stat = fs.statSync(outputPath);
     if (!stat.size) throw new Error("Impossible d'extraire la piste audio de cette vidéo.");
     return { outputPath, outputDir: dir };
+  } catch (error) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+
+// Amélioration audio non destructive : réduction de bruit et normalisation EBU R128.
+export async function enhanceVideoAudio(inputPath, options = {}) {
+  if (!ffmpegPath) throw new Error("Le moteur FFmpeg n'est pas disponible sur ce serveur.");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jv-audio-enhance-"));
+  const outputPath = path.join(dir, crypto.randomUUID() + ".mp4");
+  const denoise = options.denoise !== false;
+  const normalize = options.normalize !== false;
+  const filters = [];
+  if (denoise) filters.push("highpass=f=80", "lowpass=f=15000", "afftdn=nf=-25");
+  if (normalize) filters.push("loudnorm=I=-16:TP=-1.5:LRA=11");
+  if (!filters.length) filters.push("anull");
+  try {
+    const probe = await run(ffmpegPath, ["-hide_banner", "-i", inputPath], 30000).catch(error => {
+      const log = String(error.message || "");
+      if (/Duration:/.test(log)) return log;
+      throw error;
+    });
+    if (!/Stream #\d+:\d+.*Audio:/.test(probe)) throw new Error("Cette vidéo ne contient pas de piste audio.");
+    const durationMatch = probe.match(/Duration:\s*(\d+):(\d+):(\d+(?:\\.\d+)?)/);
+    if (!durationMatch) throw new Error("Impossible de lire la durée de cette vidéo.");
+    const duration = Number(durationMatch[1]) * 3600 + Number(durationMatch[2]) * 60 + Number(durationMatch[3]);
+    if (!Number.isFinite(duration) || duration <= 0 || duration > 3600) throw new Error("La vidéo doit durer moins de 60 minutes.");
+    await run(ffmpegPath, ["-y", "-hide_banner", "-i", inputPath, "-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-af", filters.join(","), "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", outputPath]);
+    if (!fs.statSync(outputPath).size) throw new Error("Le fichier audio amélioré est vide.");
+    return { outputPath, outputDir: dir, duration };
   } catch (error) {
     fs.rmSync(dir, { recursive: true, force: true });
     throw error;
