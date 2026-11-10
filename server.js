@@ -4,7 +4,7 @@ import multer from "multer";
 import fs from "fs";
 import path from "path";
 import Groq from "groq-sdk";
-import { removeSilenceFromVideo, removeTimeRangesFromVideo, extractCompressedAudio, enhanceVideoAudio } from "./video-processing.js";
+import { removeSilenceFromVideo, removeTimeRangesFromVideo, extractCompressedAudio, enhanceVideoAudio, renderVideoClip } from "./video-processing.js";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -690,6 +690,67 @@ app.post("/api/video/analyze-repetitions", limit("repetition-analysis", 5, 60 * 
     res.json({ duration: Number(transcription.duration) || null, candidates, message: candidates.length ? "Vérifiez chaque répétition avant de choisir les coupes." : "Aucune répétition consécutive évidente détectée." });
   } catch (error) { console.error("Repetition analysis:", error.message); if (!res.headersSent) res.status(422).json({ error: "L’analyse des répétitions a échoué." }); }
   finally { fs.unlink(req.file.path, () => {}); if (audio) fs.rm(audio.outputDir, { recursive: true, force: true }, () => {}); }
+});
+
+// Magic Clips : transcription horodatée puis proposition des passages les plus denses et accrocheurs.
+app.post("/api/video/analyze-clips", limit("magic-clips-analysis", 4, 60 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Importez une vidéo." });
+  if (!process.env.GROQ_API_KEY) { fs.unlink(req.file.path, () => {}); return res.status(503).json({ error: "Le moteur Groq n’est pas configuré." }); }
+  let audio = null;
+  try {
+    const target = Math.max(15, Math.min(60, Number(req.body && req.body.targetSeconds) || 30));
+    audio = await extractCompressedAudio(req.file.path);
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const transcript = await groq.audio.transcriptions.create({
+      file: fs.createReadStream(audio.outputPath), model: "whisper-large-v3-turbo",
+      response_format: "verbose_json", timestamp_granularities: ["word", "segment"]
+    });
+    const words = (transcript.words || []).filter(w => Number.isFinite(Number(w.start)) && Number.isFinite(Number(w.end)) && Number(w.end) > Number(w.start));
+    if (!words.length) return res.status(422).json({ error: "Aucune parole exploitable n’a été détectée dans cette vidéo." });
+    const duration = Number(transcript.duration) || Number(words[words.length - 1].end);
+    const hooks = /pourquoi|comment|voici|erreur|astuce|secret|jamais|toujours|important|attention|d'abord|premier|meilleur|résultat|conseil|3|trois|5|cinq/i;
+    const chunks = [];
+    for (let start = 0; start < duration; start += target) {
+      const end = Math.min(duration, start + target);
+      if (end - start < Math.min(8, target * 0.45)) continue;
+      const inside = words.filter(w => Number(w.start) < end && Number(w.end) > start);
+      if (!inside.length) continue;
+      const text = inside.map(w => String(w.word || "").trim()).join(" ").replace(/\s+/g, " ").trim();
+      const hookCount = (text.match(/pourquoi|comment|voici|erreur|astuce|secret|jamais|toujours|important|attention|premier|meilleur|résultat|conseil/gi) || []).length;
+      const speechDensity = inside.length / Math.max(1, end-start);
+      const score = Math.round(Math.min(100, 35 + Math.min(35, speechDensity*8) + Math.min(30, hookCount*10)));
+      chunks.push({ start: Number(start.toFixed(2)), end: Number(end.toFixed(2)), text, score, wordCount: inside.length });
+    }
+    chunks.sort((a,b) => b.score-a.score || b.wordCount-a.wordCount);
+    const candidates = chunks.slice(0, 8).sort((a,b) => a.start-b.start).map((c,i) => ({ id: "clip-"+i, ...c, title: c.text.slice(0, 78) + (c.text.length>78 ? "…" : "") }));
+    res.json({ success: true, duration, language: transcript.language || null, candidates, method: "Transcription Whisper horodatée, densité de parole et repérage de formulations accrocheuses", message: "Sélection automatique indicative : visionnez chaque passage avant export." });
+  } catch (error) {
+    console.error("Magic Clips analysis:", error.message);
+    if (!res.headersSent) res.status(422).json({ error: "L’analyse des extraits a échoué. Réessayez avec une vidéo plus courte." });
+  } finally {
+    fs.unlink(req.file.path, () => {});
+    if (audio) fs.rm(audio.outputDir, { recursive: true, force: true }, () => {});
+  }
+});
+
+// Exporte uniquement le passage demandé par l’utilisateur.
+app.post("/api/video/render-clip", limit("magic-clip-render", 10, 60 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Importez une vidéo." });
+  let result = null;
+  try {
+    result = await renderVideoClip(req.file.path, req.body && req.body.start, req.body && req.body.end);
+    res.set({ "Content-Type": "video/mp4", "Content-Length": String(result.size), "Content-Disposition": 'attachment; filename="justevivo-magic-clip.mp4"' });
+    res.sendFile(result.outputPath, error => {
+      fs.unlink(req.file.path, () => {});
+      if (result) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});
+      if (error) console.error("Magic clip download:", error.message);
+    });
+  } catch (error) {
+    fs.unlink(req.file.path, () => {});
+    if (result) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});
+    console.error("Magic clip render:", error.message);
+    if (!res.headersSent) res.status(422).json({ error: error.message || "Impossible d’exporter cet extrait." });
+  }
 });
 
 // Applique uniquement les intervalles explicitement sélectionnés dans l’interface.
