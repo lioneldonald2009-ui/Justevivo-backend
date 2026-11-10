@@ -129,7 +129,7 @@ export async function removeTimeRangesFromVideo(inputPath, intervals, options = 
     if (/Duration:/.test(log)) return log;
     throw error;
   });
-  const match = probe.match(/Duration:\s*(\d+):(\d+):(\d+(?:\\.\d+)?)/);
+  const match = probe.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
   if (!match) throw new Error("Impossible de lire la durée de cette vidéo.");
   const duration = Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
   if (!Number.isFinite(duration) || duration <= 0 || duration > 3600) throw new Error("La vidéo doit durer moins de 60 minutes.");
@@ -229,7 +229,7 @@ export async function enhanceVideoAudio(inputPath, options = {}) {
       throw error;
     });
     if (!/Stream #\d+:\d+.*Audio:/.test(probe)) throw new Error("Cette vidéo ne contient pas de piste audio.");
-    const durationMatch = probe.match(/Duration:\s*(\d+):(\d+):(\d+(?:\\.\d+)?)/);
+    const durationMatch = probe.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
     if (!durationMatch) throw new Error("Impossible de lire la durée de cette vidéo.");
     const duration = Number(durationMatch[1]) * 3600 + Number(durationMatch[2]) * 60 + Number(durationMatch[3]);
     if (!Number.isFinite(duration) || duration <= 0 || duration > 3600) throw new Error("La vidéo doit durer moins de 60 minutes.");
