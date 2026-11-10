@@ -764,14 +764,22 @@ app.post("/api/video/translate-clips", limit("magic-clips-translation", 12, 60 *
     const languageNames = {fr:"français",en:"anglais",pt:"portugais",es:"espagnol",ja:"japonais",de:"allemand",it:"italien",ar:"arabe",zh:"chinois simplifié",ru:"russe"};
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
     const completion = await groq.chat.completions.create({
-      model: "llama-3.3-70b-versatile", temperature: 0.2,
+      model: "openai/gpt-oss-20b", temperature: 0.1, max_completion_tokens: 4096,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: "Tu es un traducteur professionnel de sous-titres vidéo. Traduis chaque texte dans la langue demandée en conservant le sens, le ton oral et la concision. Retourne uniquement un objet JSON avec une propriété candidates, tableau de chaînes dans le même ordre. Ne résume pas et n'ajoute aucune explication." },
         { role: "user", content: JSON.stringify({ targetLanguage: languageNames[targetLanguage], texts: candidates.map(x => x.text) }) }
       ]
     });
-    const parsed = JSON.parse(completion.choices?.[0]?.message?.content || "{}");
+    const rawTranslation = completion.choices?.[0]?.message?.content || "";
+    let parsed;
+    try {
+      parsed = JSON.parse(rawTranslation);
+    } catch (parseError) {
+      const jsonMatch = rawTranslation.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error("Le moteur a retourné une réponse qui n’est pas au format JSON.");
+      parsed = JSON.parse(jsonMatch[0]);
+    }
     if (!Array.isArray(parsed.candidates) || parsed.candidates.length !== candidates.length) throw new Error("La réponse du moteur de traduction est incomplète.");
     await sbInsert("usage", {
       user_id: req.user.id,
@@ -782,7 +790,8 @@ app.post("/api/video/translate-clips", limit("magic-clips-translation", 12, 60 *
     res.json({ success: true, candidates: candidates.map((x,i) => ({ start:Number(x.start)||0, end:Number(x.end)||0, translatedText:String(parsed.candidates[i] || "") })), targetLanguage });
   } catch (error) {
     console.error("Magic Clips translation:", error.message);
-    res.status(422).json({ error: "La traduction IA a échoué. Réessayez dans un instant." });
+    const status = error.status === 429 || error.status >= 500 ? 503 : 422;
+    res.status(status).json({ error: status === 503 ? "Le moteur de traduction est temporairement indisponible. Réessayez dans quelques instants." : "La traduction IA n’a pas pu traiter ces extraits. Vérifiez les textes et réessayez." });
   }
 });
 
