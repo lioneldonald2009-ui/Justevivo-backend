@@ -765,6 +765,8 @@ app.post("/api/video/translate-clips", limit("magic-clips-translation", 12, 60 *
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
     const completion = await groq.chat.completions.create({
       model: "openai/gpt-oss-20b", temperature: 0.1, max_completion_tokens: 4096,
+      include_reasoning: false,
+      reasoning_effort: "low",
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: "Tu es un traducteur professionnel de sous-titres vidéo. Traduis chaque texte dans la langue demandée en conservant le sens, le ton oral et la concision. Retourne uniquement un objet JSON avec une propriété candidates, tableau de chaînes dans le même ordre. Ne résume pas et n'ajoute aucune explication." },
@@ -780,7 +782,10 @@ app.post("/api/video/translate-clips", limit("magic-clips-translation", 12, 60 *
       if (!jsonMatch) throw new Error("Le moteur a retourné une réponse qui n’est pas au format JSON.");
       parsed = JSON.parse(jsonMatch[0]);
     }
-    if (!Array.isArray(parsed.candidates) || parsed.candidates.length !== candidates.length) throw new Error("La réponse du moteur de traduction est incomplète.");
+    if (!Array.isArray(parsed.candidates) || parsed.candidates.length !== candidates.length ||
+        parsed.candidates.some(text => typeof text !== "string" || !text.trim())) {
+      throw new Error("La réponse du moteur de traduction est incomplète.");
+    }
     await sbInsert("usage", {
       user_id: req.user.id,
       job_id: "mct" + Date.now() + Math.random().toString(36).slice(2, 7),
@@ -790,8 +795,14 @@ app.post("/api/video/translate-clips", limit("magic-clips-translation", 12, 60 *
     res.json({ success: true, candidates: candidates.map((x,i) => ({ start:Number(x.start)||0, end:Number(x.end)||0, translatedText:String(parsed.candidates[i] || "") })), targetLanguage });
   } catch (error) {
     console.error("Magic Clips translation:", error.message);
-    const status = error.status === 429 || error.status >= 500 ? 503 : 422;
-    res.status(status).json({ error: status === 503 ? "Le moteur de traduction est temporairement indisponible. Réessayez dans quelques instants." : "La traduction IA n’a pas pu traiter ces extraits. Vérifiez les textes et réessayez." });
+    const providerStatus = Number(error.status || error.statusCode || 0);
+    const status = providerStatus === 429 ? 429 : providerStatus === 401 || providerStatus === 403 ? 503 : providerStatus >= 500 || providerStatus === 404 ? 503 : 422;
+    const message = status === 429
+      ? "Le service IA est momentanément saturé. Attendez une minute puis réessayez."
+      : status === 503
+        ? "Le moteur IA est temporairement indisponible ou mal configuré. Réessayez plus tard."
+        : "La traduction n’a pas pu traiter ces extraits. Vérifiez les textes et réessayez.";
+    res.status(status).json({ error: message, code: status === 429 ? "AI_RATE_LIMIT" : status === 503 ? "AI_UNAVAILABLE" : "TRANSLATION_INVALID" });
   }
 });
 
