@@ -985,6 +985,7 @@ app.post("/api/video/compose", limit("video-compose", 4, 60 * 60 * 1000), requir
         brollStart: req.body && req.body.brollStart,
         brollEnd: req.body && req.body.brollEnd,
         brollScale: req.body && req.body.brollScale,
+        brollPosition: req.body && req.body.brollPosition,
         audioVolume: req.body && req.body.audioVolume
       });
       res.set({
