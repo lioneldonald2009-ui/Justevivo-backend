@@ -387,7 +387,7 @@ const upload = multer({
 const uploadCompose = multer({
   storage,
   limits: { fileSize: 200 * 1024 * 1024, files: 3, fields: 12, parts: 18 },
-  fileFilter: upload.options?.fileFilter || ((req, file, cb) => cb(null, true))
+  fileFilter(req, file, cb) {\n    const ext = path.extname(String(file.originalname || "")).toLowerCase();\n    const mime = String(file.mimetype || "").toLowerCase();\n    const validExtension = ALLOWED_MEDIA_EXTENSIONS.has(ext);\n    const validMime = ALLOWED_MEDIA_MIME_PREFIXES.some(prefix => mime.startsWith(prefix)) || ALLOWED_GENERIC_MIME_TYPES.has(mime);\n    if (!validExtension || !validMime) { const error = new Error("Format non accepté."); error.code = "UNSUPPORTED_MEDIA_TYPE"; return cb(error); }\n    cb(null, true);\n  }
 });
 
 // Vérifier que le serveur fonctionne
