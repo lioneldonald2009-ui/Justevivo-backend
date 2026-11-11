@@ -336,24 +336,19 @@ async function applyDodoWebhook(event, webhookId) {
   if (eventKey) {
     const exists = await sbGet("usage?job_id=eq.dodo_evt_" + encodeURIComponent(eventKey) + "&kind=eq.dodo_event&select=id&limit=1");
     if (exists.length) return;
-    await sbInsert("usage", { user_id: userId, job_id: "dodo_evt_" + eventKey, kind: "dodo_event", seconds: 0 });
   }
   await getAccount(userId);
   if (["subscription.active","subscription.renewed","subscription.plan_changed"].includes(type)) {
     if (!plan || !PLANS[plan]) throw new Error("Formule Dodo inconnue : " + type);
     await sbPatch("profiles?user_id=eq." + userId, { plan, plan_until: dodoPeriodEnd(data) });
-    return;
-  }
-  if (["subscription.on_hold","subscription.paused","subscription.expired","subscription.failed"].includes(type)) {
+  } else if (["subscription.on_hold","subscription.paused","subscription.expired","subscription.failed"].includes(type)) {
     await sbPatch("profiles?user_id=eq." + userId, { plan: "free", plan_until: null });
-    return;
-  }
-  if (type === "subscription.cancelled") {
+  } else if (type === "subscription.cancelled") {
     const end = [data.current_period_end, data.next_billing_date, data.cancel_at].map(v => v ? new Date(v) : null).find(d => d && Number.isFinite(d.getTime()) && d.getTime() > Date.now());
     await sbPatch("profiles?user_id=eq." + userId, end ? { plan_until: end.toISOString() } : { plan: "free", plan_until: null });
   }
+  if (eventKey) await sbInsert("usage", { user_id: userId, job_id: "dodo_evt_" + eventKey, kind: "dodo_event", seconds: 0 });
 }
-
 const hits = new Map();
 
 function limit(name, max, windowMs) {
