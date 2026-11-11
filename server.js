@@ -922,6 +922,61 @@ app.post("/api/video/enhance-audio", limit("audio-enhance", 5, 60 * 60 * 1000), 
 
 
 /* Génération d'un script de tournage complet avec le modèle Groq déjà configuré. */
+// Suggestions de B-roll contextuelles : découpage visuel exploitable par le monteur.
+app.post("/api/creative/suggest-broll", limit("creative-broll", 10, 60 * 60 * 1000), requireUser, async (req, res) => {
+  if (!process.env.GROQ_API_KEY) return res.status(503).json({ error: "Le moteur IA n’est pas configuré." });
+  const source = String(req.body?.script || req.body?.topic || "").trim().slice(0, 6000);
+  const platform = String(req.body?.platform || "Instagram Reels").slice(0, 40);
+  const style = String(req.body?.style || "cinématographique, naturel et premium").slice(0, 100);
+  if (source.length < 20) return res.status(400).json({ error: "Ajoutez un script ou une description d’au moins 20 caractères." });
+  try {
+    const account = await getAccount(req.user.id, req.user.email);
+    if (!account.isAdmin && account.generatedToday >= account.limits.gen) {
+      return res.status(403).json({ error: "Votre quota quotidien de générations IA est atteint.", code: "QUOTA" });
+    }
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const prompt = [
+      "Analyse ce script et construis un plan de B-roll réellement montable.",
+      "Retourne uniquement un JSON valide de forme {scenes:[{time,voiceLine,visual,shotType,searchQuery,aiVisualPrompt,transition,onScreenText}]} avec 4 à 8 scènes.",
+      "Les timecodes sont des estimations relatives et doivent être séquentiels, au format mm:ss.",
+      "Chaque visual doit décrire une image concrète, filmable ou trouvable en banque de vidéos.",
+      "searchQuery doit être une requête courte en anglais adaptée à une banque de stock vidéo.",
+      "aiVisualPrompt doit être un prompt visuel détaillé, sans texte incrusté, cohérent avec une vidéo " + platform + ".",
+      "Varie les plans, privilégie les images pertinentes à la phrase prononcée et évite les clichés génériques.",
+      "Propose des transitions sobres, jamais plus d'une transition forte par scène.",
+      "Style visuel : " + style + ".",
+      "Script : " + source
+    ].join("\n");
+    const raw = await askModel(groq, [
+      { role: "system", content: "Tu es un réalisateur, directeur photo et monteur spécialisé en vidéos sociales. Tu produis un storyboard concret, précis et cohérent. Réponds en JSON valide uniquement." },
+      { role: "user", content: prompt }
+    ]);
+    let parsed;
+    try {
+      const clean = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+      parsed = JSON.parse(clean);
+    } catch (_) {
+      throw new Error("Le moteur IA a renvoyé un plan non exploitable. Relancez la génération.");
+    }
+    const scenes = Array.isArray(parsed.scenes) ? parsed.scenes.slice(0, 8).map(x => ({
+      time: String(x.time || ""),
+      voiceLine: String(x.voiceLine || "").slice(0, 500),
+      visual: String(x.visual || "").slice(0, 700),
+      shotType: String(x.shotType || "").slice(0, 100),
+      searchQuery: String(x.searchQuery || "").slice(0, 180),
+      aiVisualPrompt: String(x.aiVisualPrompt || "").slice(0, 900),
+      transition: String(x.transition || "").slice(0, 120),
+      onScreenText: String(x.onScreenText || "").slice(0, 140)
+    })) : [];
+    if (scenes.length < 3) throw new Error("Le plan de B-roll généré est trop court. Réessayez.");
+    if (!account.isAdmin) await sbInsert("usage", { user_id: req.user.id, job_id: "br" + Date.now() + Math.random().toString(36).slice(2, 7), kind: "generate", seconds: 0 });
+    res.json({ success: true, scenes, count: scenes.length });
+  } catch (error) {
+    console.error("Suggestions B-roll :", error.message);
+    res.status(500).json({ error: error.message || "Impossible de créer le plan B-roll." });
+  }
+});
+
 app.post("/api/creative/generate-script", limit("creative-script", 8, 60 * 60 * 1000), requireUser, async (req, res) => {
   if (!process.env.GROQ_API_KEY) return res.status(503).json({ error: "Le moteur IA n’est pas configuré." });
   const body = req.body || {};
