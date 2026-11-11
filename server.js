@@ -4,7 +4,7 @@ import multer from "multer";
 import fs from "fs";
 import path from "path";
 import Groq from "groq-sdk";
-import { removeSilenceFromVideo, removeTimeRangesFromVideo, extractCompressedAudio, enhanceVideoAudio, renderVideoClip } from "./video-processing.js";
+import { removeSilenceFromVideo, removeTimeRangesFromVideo, extractCompressedAudio, enhanceVideoAudio, renderVideoClip, composeVideoWithAssets } from "./video-processing.js";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -381,6 +381,13 @@ const upload = multer({
 
     cb(null, true);
   }
+});
+
+// Composition vidéo : vidéo principale + B-roll + piste audio facultative.
+const uploadCompose = multer({
+  storage,
+  limits: { fileSize: 200 * 1024 * 1024, files: 3, fields: 12, parts: 18 },
+  fileFilter: upload.options?.fileFilter || ((req, file, cb) => cb(null, true))
 });
 
 // Vérifier que le serveur fonctionne
@@ -905,6 +912,93 @@ app.post("/api/video/enhance-audio", limit("audio-enhance", 5, 60 * 60 * 1000), 
     if (!res.headersSent) res.status(422).json({ error: error.message || "L’amélioration audio a échoué." });
   }
 });
+
+
+/* Génération d'un script de tournage complet avec le modèle Groq déjà configuré. */
+app.post("/api/creative/generate-script", limit("creative-script", 8, 60 * 60 * 1000), requireUser, async (req, res) => {
+  if (!process.env.GROQ_API_KEY) return res.status(503).json({ error: "Le moteur IA n’est pas configuré." });
+  const body = req.body || {};
+  const topic = String(body.topic || "").trim().slice(0, 1200);
+  const platform = String(body.platform || "TikTok").slice(0, 30);
+  const duration = Math.max(15, Math.min(180, Number(body.duration) || 45));
+  const tone = String(body.tone || "Naturel et dynamique").slice(0, 80);
+  const language = String(body.language || "français").slice(0, 40);
+  const objective = String(body.objective || "Engagement").slice(0, 60);
+  if (topic.length < 5) return res.status(400).json({ error: "Décrivez le sujet de votre vidéo." });
+  try {
+    const account = await getAccount(req.user.id, req.user.email);
+    if (!account.isAdmin && account.generatedToday >= account.limits.gen) {
+      return res.status(403).json({ error: "Votre quota quotidien de générations IA est atteint.", code: "QUOTA" });
+    }
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const prompt = [
+      "Crée un brief de production audiovisuelle exploitable, précis et naturel.",
+      "Retourne exclusivement un objet JSON valide, sans Markdown, avec les propriétés : hook (phrase d'ouverture), voiceover (texte intégral à dire), scenes (tableau de 3 à 8 objets contenant time, visual, onScreenText, direction), cta (appel à l'action), caption (légende sociale), hashtags (tableau de 5 à 10 hashtags).",
+      "La durée cible est " + duration + " secondes. Le script doit pouvoir être réellement prononcé dans ce temps, sans débit artificiel.",
+      "Plateforme : " + platform + ". Langue : " + language + ". Ton : " + tone + ". Objectif : " + objective + ".",
+      "Sujet et contexte : " + topic,
+      "Les scènes doivent être filmables ou montables avec des ressources simples. N'invente aucun témoignage, chiffre, résultat, source ni promesse. Le texte à l'écran doit rester très court. La voix off doit être fluide, sans indications techniques."
+    ].join("\n");
+    const raw = await askModel(groq, [
+      { role: "system", content: "Tu es directeur créatif, scénariste vidéo courte et monteur senior. Tu produis un JSON valide et tu n'inventes jamais de faits." },
+      { role: "user", content: prompt }
+    ]);
+    let parsed;
+    try { parsed = JSON.parse(raw.replace(/^\u0060\u0060\u0060(?:json)?\s*/i, "").replace(/\s*\u0060\u0060\u0060$/, "").trim()); }
+    catch (_) {
+      const match = raw.match(/\{[\s\S]*\}/);
+      if (!match) throw new Error("Le moteur n’a pas retourné un brief structuré.");
+      parsed = JSON.parse(match[0]);
+    }
+    if (typeof parsed.voiceover !== "string" || !Array.isArray(parsed.scenes) || !parsed.scenes.length) throw new Error("Le brief IA est incomplet.");
+    await sbInsert("usage", { user_id: req.user.id, job_id: "script" + Date.now() + Math.random().toString(36).slice(2,7), kind: "generate", seconds: 0 });
+    res.json({ success: true, brief: parsed });
+  } catch (error) {
+    console.error("Creative script generation:", error.message);
+    res.status(422).json({ error: "La génération du brief a échoué. Réessayez avec un sujet plus précis." });
+  }
+});
+
+/* Assemble le B-roll et/ou une piste voix off/musique dans un nouveau MP4. */
+app.post("/api/video/compose", limit("video-compose", 4, 60 * 60 * 1000), requireUser,
+  uploadCompose.fields([{ name: "video", maxCount: 1 }, { name: "broll", maxCount: 1 }, { name: "audio", maxCount: 1 }]),
+  async (req, res) => {
+    const files = req.files || {};
+    const main = files.video && files.video[0];
+    const broll = files.broll && files.broll[0];
+    const audio = files.audio && files.audio[0];
+    let result = null;
+    const cleanupUploads = () => [main, broll, audio].filter(Boolean).forEach(file => fs.unlink(file.path, () => {}));
+    if (!main) { cleanupUploads(); return res.status(400).json({ error: "Importez d’abord la vidéo principale dans le studio." }); }
+    if (!broll && !audio) { cleanupUploads(); return res.status(400).json({ error: "Ajoutez un B-roll ou une piste audio à intégrer." }); }
+    try {
+      result = await composeVideoWithAssets(main.path, {
+        brollPath: broll && broll.path,
+        audioPath: audio && audio.path,
+        brollStart: req.body && req.body.brollStart,
+        brollEnd: req.body && req.body.brollEnd,
+        brollScale: req.body && req.body.brollScale,
+        audioVolume: req.body && req.body.audioVolume
+      });
+      res.set({
+        "Content-Type": "video/mp4",
+        "Content-Length": String(result.size),
+        "Content-Disposition": 'attachment; filename="justevivo-composition.mp4"',
+        "X-JV-BROLL-APPLIED": String(result.hasBroll),
+        "X-JV-AUDIO-APPLIED": String(result.hasExternalAudio)
+      });
+      res.sendFile(result.outputPath, () => {
+        cleanupUploads();
+        if (result && result.outputDir) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});
+      });
+    } catch (error) {
+      cleanupUploads();
+      if (result && result.outputDir) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});
+      console.error("Video composition:", error.message);
+      if (!res.headersSent) res.status(422).json({ error: error.message || "La composition vidéo a échoué." });
+    }
+  }
+);
 
 // ===== Traduction des sous-titres : conserve exactement les timings =====
 const SUBTITLE_LANGUAGES = {
