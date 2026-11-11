@@ -6,6 +6,7 @@ import path from "path";
 import Groq from "groq-sdk";
 import { removeSilenceFromVideo, removeTimeRangesFromVideo, extractCompressedAudio, enhanceVideoAudio, renderVideoClip, composeVideoWithAssets } from "./video-processing.js";
 import dotenv from "dotenv";
+import DodoPayments from "dodopayments";
 
 dotenv.config();
 
@@ -28,7 +29,7 @@ app.use(cors({
 }));
 // Les lots de sous-titres peuvent dépasser 20 Ko (jusqu’à 300 segments).
 // La limite reste bornée pour éviter les payloads JSON excessifs.
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "10mb", verify: (req, res, buf) => { req.rawBody = Buffer.from(buf); } }));
 
 // ===== Comptes (Supabase) =====
 const SB_URL = (process.env.SUPABASE_URL || "").replace(/\/+$/, "");
@@ -63,15 +64,18 @@ const PLANS = {
   business: { name: "Business", videos: 110, maxSeconds: 3600, gen: 200 }
 };
 
-// ===== Paiement (FedaPay) =====
-const FEDA_KEY = process.env.FEDAPAY_SECRET_KEY || "";
-const FEDA_BASE = (process.env.FEDAPAY_ENV || "sandbox").toLowerCase() === "live"
-  ? "https://api.fedapay.com/v1"
-  : "https://sandbox-api.fedapay.com/v1";
-const PAY_ON = ACCOUNTS_ON && Boolean(FEDA_KEY);
-
-// Prix pour 30 jours, en francs CFA (1 $ ≈ 600 F)
-const PRICES_XOF = { starter: 6000, pro: 9000, business: 15000 };
+// ===== Paiements Dodo Payments =====
+const DODO_API_KEY = String(process.env.DODO_PAYMENTS_API_KEY || "").trim();
+const DODO_WEBHOOK_KEY = String(process.env.DODO_PAYMENTS_WEBHOOK_KEY || "").trim();
+const DODO_ENV = String(process.env.DODO_PAYMENTS_ENVIRONMENT || "test_mode").trim() === "live_mode" ? "live_mode" : "test_mode";
+const DODO_PRODUCTS = {
+  starter: String(process.env.DODO_PRODUCT_STARTER || "").trim(),
+  pro: String(process.env.DODO_PRODUCT_PRO || "").trim(),
+  business: String(process.env.DODO_PRODUCT_BUSINESS || "").trim()
+};
+const DODO_ENABLED = ACCOUNTS_ON && Boolean(DODO_API_KEY && DODO_WEBHOOK_KEY && DODO_PRODUCTS.starter && DODO_PRODUCTS.pro && DODO_PRODUCTS.business);
+const PAY_ON = DODO_ENABLED;
+const dodo = DODO_API_KEY ? new DodoPayments({ bearerToken: DODO_API_KEY, environment: DODO_ENV, webhookKey: DODO_WEBHOOK_KEY || undefined }) : null;
 
 function fmtLimit(sec) {
   return sec >= 60 ? Math.round(sec / 60) + " min" : sec + " s";
@@ -303,6 +307,53 @@ async function settlePayments(userId) {
 }
 
 // ===== Limite de demandes par personne =====
+// Helpers Dodo : accès accordé uniquement après webhook signé.
+function dodoPlanFromData(data) {
+  const meta = data && data.metadata && typeof data.metadata === "object" ? data.metadata : {};
+  const hinted = String(meta.plan || "").toLowerCase();
+  if (["starter","pro","business"].includes(hinted)) return hinted;
+  const productId = String(data && (data.product_id || data.product && data.product.product_id) || "");
+  return Object.keys(DODO_PRODUCTS).find(k => DODO_PRODUCTS[k] && DODO_PRODUCTS[k] === productId) || "";
+}
+function dodoUserFromData(data) {
+  const meta = data && data.metadata && typeof data.metadata === "object" ? data.metadata : {};
+  return String(meta.user_id || "");
+}
+function dodoPeriodEnd(data) {
+  for (const value of [data && data.next_billing_date, data && data.current_period_end, data && data.expires_at, data && data.period_end]) {
+    const date = value ? new Date(value) : null;
+    if (date && Number.isFinite(date.getTime())) return date.toISOString();
+  }
+  return new Date(Date.now() + 30 * 86400000).toISOString();
+}
+async function applyDodoWebhook(event, webhookId) {
+  const data = event && event.data || {};
+  const type = String(event && event.type || "");
+  const userId = dodoUserFromData(data);
+  const plan = dodoPlanFromData(data);
+  if (!userId) { console.warn("Webhook Dodo sans metadata.user_id", type); return; }
+  const eventKey = String(webhookId || event.id || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 100);
+  if (eventKey) {
+    const exists = await sbGet("usage?job_id=eq.dodo_evt_" + encodeURIComponent(eventKey) + "&kind=eq.dodo_event&select=id&limit=1");
+    if (exists.length) return;
+    await sbInsert("usage", { user_id: userId, job_id: "dodo_evt_" + eventKey, kind: "dodo_event", seconds: 0 });
+  }
+  await getAccount(userId);
+  if (["subscription.active","subscription.renewed","subscription.plan_changed"].includes(type)) {
+    if (!plan || !PLANS[plan]) throw new Error("Formule Dodo inconnue : " + type);
+    await sbPatch("profiles?user_id=eq." + userId, { plan, plan_until: dodoPeriodEnd(data) });
+    return;
+  }
+  if (["subscription.on_hold","subscription.paused","subscription.expired","subscription.failed"].includes(type)) {
+    await sbPatch("profiles?user_id=eq." + userId, { plan: "free", plan_until: null });
+    return;
+  }
+  if (type === "subscription.cancelled") {
+    const end = [data.current_period_end, data.next_billing_date, data.cancel_at].map(v => v ? new Date(v) : null).find(d => d && Number.isFinite(d.getTime()) && d.getTime() > Date.now());
+    await sbPatch("profiles?user_id=eq." + userId, end ? { plan_until: end.toISOString() } : { plan: "free", plan_until: null });
+  }
+}
+
 const hits = new Map();
 
 function limit(name, max, windowMs) {
@@ -409,7 +460,7 @@ app.get("/", (req, res) => {
 app.get("/api/config", (req, res) => {
   res.json(
     ACCOUNTS_ON
-      ? { enabled: true, url: SB_URL, anonKey: SB_ANON, payments: PAY_ON, captchaSiteKey: CAPTCHA_SITE_KEY }
+      ? { enabled: true, url: SB_URL, anonKey: SB_ANON, payments: DODO_ENABLED, paymentProvider: "dodo", paymentEnvironment: DODO_ENV, captchaSiteKey: CAPTCHA_SITE_KEY }
       : { enabled: false }
   );
 });
@@ -419,14 +470,6 @@ app.get("/api/me", requireUser, async (req, res) => {
   if (!req.user) return res.json({ enabled: false });
 
   try {
-    if (PAY_ON) {
-      try {
-        await settlePayments(req.user.id);
-      } catch (e) {
-        console.error("Erreur de vérification des paiements :", e.message);
-      }
-    }
-
     const a = await getAccount(req.user.id, req.user.email);
     res.json({
       enabled: true,
@@ -448,59 +491,45 @@ app.get("/api/me", requireUser, async (req, res) => {
   }
 });
 
-// Début d'un paiement : crée la transaction et renvoie le lien de paiement
-app.post(
-  "/api/me/pay/create",
-  limit("pay", 10, 10 * 60 * 1000),
-  requireUser,
-  async (req, res) => {
-    if (!PAY_ON || !req.user) {
-      return res.status(503).json({ error: "Le paiement en ligne n'est pas encore activé." });
-    }
-
-    if (isAdminUser(req.user)) {
-      return res.status(403).json({ error: "Le compte administrateur bénéficie déjà de tous les accès.", code: "ADMIN" });
-    }
-
-    const plan = String((req.body && req.body.plan) || "").toLowerCase();
-    if (!PRICES_XOF[plan]) {
-      return res.status(400).json({ error: "Formule inconnue." });
-    }
-
-    try {
-      const created = unwrap(await fedaCall("POST", "/transactions", {
-        description: "Abonnement JUSTEVIVO " + PLANS[plan].name + " (30 jours)",
-        amount: PRICES_XOF[plan],
-        currency: { iso: "XOF" },
-        callback_url: SITE_URL + "?pay=return",
-        customer: { email: req.user.email },
-        custom_metadata: { user_id: req.user.id, plan }
-      }));
-
-      const id = created.id;
-      if (!id) throw new Error("transaction sans identifiant");
-
-      const tok = await fedaCall("POST", "/transactions/" + id + "/token", {});
-      const url = findKey(tok, "url");
-
-      if (!url || url.indexOf("https://") !== 0) {
-        throw new Error("lien de paiement introuvable");
-      }
-
-      await sbInsert("usage", {
-        user_id: req.user.id,
-        job_id: "tx" + id,
-        kind: "pay_pending",
-        seconds: 0
-      });
-
-      res.json({ success: true, id, url });
-    } catch (e) {
-      console.error("Erreur de création du paiement :", e.message);
-      res.status(500).json({ error: "Impossible de lancer le paiement pour le moment. Réessayez." });
-    }
+// Checkout récurrent Dodo : les trois produits doivent être configurés en abonnement mensuel.
+app.post("/api/me/pay/create", limit("pay", 10, 10 * 60 * 1000), requireUser, async (req, res) => {
+  if (!DODO_ENABLED || !dodo) return res.status(503).json({ error: "Le paiement Dodo n'est pas encore configuré.", code: "PAYMENTS_NOT_CONFIGURED" });
+  if (isAdminUser(req.user)) return res.status(403).json({ error: "Le compte administrateur bénéficie déjà de tous les accès.", code: "ADMIN" });
+  const plan = String(req.body && req.body.plan || "").toLowerCase();
+  if (!["starter","pro","business"].includes(plan) || !DODO_PRODUCTS[plan]) return res.status(400).json({ error: "Formule inconnue." });
+  try {
+    const session = await dodo.checkoutSessions.create({
+      product_cart: [{ product_id: DODO_PRODUCTS[plan], quantity: 1 }],
+      customer: { email: req.user.email },
+      metadata: { user_id: req.user.id, plan, app: "justevivo" },
+      return_url: process.env.DODO_PAYMENTS_RETURN_URL || (SITE_URL.replace(/\/$/, "") + "/?payment=dodo-return"),
+      feature_flags: { allow_currency_selection: true, allow_customer_editing_email: false }
+    });
+    if (!session || !session.checkout_url || !String(session.checkout_url).startsWith("https://")) throw new Error("URL checkout absente");
+    res.json({ success: true, provider: "dodo", checkoutUrl: session.checkout_url });
+  } catch (e) {
+    console.error("Erreur checkout Dodo :", e.message);
+    res.status(502).json({ error: "Impossible de créer la session de paiement. Vérifiez la configuration Dodo et réessayez." });
   }
-);
+});
+
+app.post("/api/payments/dodo/webhook", async (req, res) => {
+  if (!dodo || !DODO_WEBHOOK_KEY || !req.rawBody) return res.status(503).json({ error: "Webhook Dodo non configuré." });
+  try {
+    const event = dodo.webhooks.unwrap(req.rawBody.toString("utf8"), {
+      headers: {
+        "webhook-id": String(req.headers["webhook-id"] || ""),
+        "webhook-signature": String(req.headers["webhook-signature"] || ""),
+        "webhook-timestamp": String(req.headers["webhook-timestamp"] || "")
+      }
+    });
+    await applyDodoWebhook(event, String(req.headers["webhook-id"] || event.id || ""));
+    return res.json({ received: true });
+  } catch (e) {
+    console.error("Webhook Dodo rejeté/échoué :", e.message);
+    return res.status(400).json({ error: "Webhook invalide ou traitement impossible." });
+  }
+});
 
 // Correction linguistique légère des segments ASR : conserve les timings et protège les noms propres.
 async function correctTranscriptSegments(groq, segments, language) {
