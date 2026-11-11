@@ -264,3 +264,60 @@ export async function renderVideoClip(inputPath, startSeconds, endSeconds) {
     throw error;
   }
 }
+
+
+// Assemble une vidéo principale avec un plan B-roll en incrustation et/ou une piste audio externe.
+export async function composeVideoWithAssets(inputPath, options = {}) {
+  if (!ffmpegPath) throw new Error("Le moteur FFmpeg n'est pas disponible sur ce serveur.");
+  const brollPath = options.brollPath || null;
+  const audioPath = options.audioPath || null;
+  if (!brollPath && !audioPath) throw new Error("Ajoutez un B-roll ou une piste audio à intégrer.");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jv-compose-"));
+  const outputPath = path.join(dir, crypto.randomUUID() + ".mp4");
+  try {
+    const probe = await run(ffmpegPath, ["-hide_banner", "-i", inputPath], 30000).catch(error => {
+      const log = String(error.message || "");
+      if (/Duration:/.test(log)) return log;
+      throw error;
+    });
+    const durationMatch = probe.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+    if (!durationMatch) throw new Error("Impossible de lire la durée de la vidéo principale.");
+    const duration = Number(durationMatch[1]) * 3600 + Number(durationMatch[2]) * 60 + Number(durationMatch[3]);
+    if (!Number.isFinite(duration) || duration <= 0 || duration > 3600) throw new Error("La vidéo doit durer moins de 60 minutes.");
+    const hasMainAudio = /Stream #\d+:\d+.*Audio:/.test(probe);
+    const args = ["-y", "-hide_banner", "-i", inputPath];
+    let brollInput = -1, audioInput = -1;
+    if (brollPath) { args.push("-stream_loop", "-1", "-i", brollPath); brollInput = 1; }
+    if (audioPath) { args.push("-stream_loop", "-1", "-i", audioPath); audioInput = brollPath ? 2 : 1; }
+    const filters = [];
+    let videoMap = "0:v:0";
+    if (brollInput >= 0) {
+      const start = Math.max(0, Math.min(duration - 0.1, Number(options.brollStart) || 0));
+      const end = Math.max(start + 0.1, Math.min(duration, Number(options.brollEnd) || Math.min(duration, start + 8)));
+      const scale = Math.max(18, Math.min(55, Number(options.brollScale) || 28));
+      filters.push("[" + brollInput + ":v]scale=iw*" + (scale / 100).toFixed(2) + ":-2,setsar=1[broll]");
+      filters.push("[0:v][broll]overlay=x=W-w-24:y=H-h-24:enable='between(t," + start.toFixed(2) + "," + end.toFixed(2) + ")':eof_action=pass[vout]");
+      videoMap = "[vout]";
+    }
+    let audioMap = "0:a?";
+    if (audioInput >= 0) {
+      const volume = Math.max(0, Math.min(1, Number(options.audioVolume) || 0.22));
+      filters.push("[" + audioInput + ":a]volume=" + volume.toFixed(2) + "[music]");
+      if (hasMainAudio) {
+        filters.push("[0:a][music]amix=inputs=2:duration=first:dropout_transition=2[aout]");
+        audioMap = "[aout]";
+      } else audioMap = "[music]";
+    }
+    if (filters.length) args.push("-filter_complex", filters.join(";"));
+    args.push("-map", videoMap, "-map", audioMap, "-t", duration.toFixed(3),
+      "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+      "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", outputPath);
+    await run(ffmpegPath, args, 20 * 60 * 1000);
+    const stat = fs.statSync(outputPath);
+    if (!stat.size) throw new Error("Le rendu final est vide.");
+    return { outputPath, outputDir: dir, size: stat.size, duration, hasBroll: Boolean(brollPath), hasExternalAudio: Boolean(audioPath) };
+  } catch (error) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
