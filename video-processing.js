@@ -296,7 +296,15 @@ export async function composeVideoWithAssets(inputPath, options = {}) {
       const end = Math.max(start + 0.1, Math.min(duration, Number(options.brollEnd) || Math.min(duration, start + 8)));
       const scale = Math.max(18, Math.min(55, Number(options.brollScale) || 28));
       filters.push("[" + brollInput + ":v]scale=iw*" + (scale / 100).toFixed(2) + ":-2,setsar=1[broll]");
-      filters.push("[0:v][broll]overlay=x=W-w-24:y=H-h-24:enable='between(t," + start.toFixed(2) + "," + end.toFixed(2) + ")':eof_action=pass[vout]");
+      const positions = {
+        "bottom-right": { x: "W-w-24", y: "H-h-24" },
+        "bottom-left": { x: "24", y: "H-h-24" },
+        "top-right": { x: "W-w-24", y: "24" },
+        "top-left": { x: "24", y: "24" },
+        "center": { x: "(W-w)/2", y: "(H-h)/2" }
+      };
+      const position = positions[String(options.brollPosition || "bottom-right")] || positions["bottom-right"];
+      filters.push("[0:v][broll]overlay=x=" + position.x + ":y=" + position.y + ":enable='between(t," + start.toFixed(2) + "," + end.toFixed(2) + ")':eof_action=pass[vout]");
       videoMap = "[vout]";
     }
     let audioMap = "0:a?";
