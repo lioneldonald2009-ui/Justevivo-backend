@@ -392,7 +392,9 @@ const uploadCompose = multer({
     const mime = String(file.mimetype || "").toLowerCase();
     const validExtension = ALLOWED_MEDIA_EXTENSIONS.has(ext);
     const validMime = ALLOWED_MEDIA_MIME_PREFIXES.some(prefix => mime.startsWith(prefix)) || ALLOWED_GENERIC_MIME_TYPES.has(mime);
-    if (!validExtension || !validMime) { const error = new Error("Format non accepté."); error.code = "UNSUPPORTED_MEDIA_TYPE"; return cb(error); }\n    cb(null, true);\n  }
+    if (!validExtension || !validMime) { const error = new Error("Format non accepté."); error.code = "UNSUPPORTED_MEDIA_TYPE"; return cb(error); }
+    cb(null, true);
+  }
 });
 
 // Vérifier que le serveur fonctionne
