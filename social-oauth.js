@@ -129,6 +129,7 @@ export function registerSocialOAuth(app, requireUser) {
       if (provider === "tiktok") { delete params.client_id; params.client_key = process.env[p.client]; }
       if (provider === "youtube") { params.access_type = "offline"; params.prompt = "consent"; params.include_granted_scopes = "true"; }
       for (const [k,v] of Object.entries(params)) u.searchParams.set(k, String(v));
+      if (String(req.query.json || "") === "1") return res.json({ url: u.toString() });
       res.redirect(302, u.toString());
     } catch (e) { res.status(503).json({ error: e.message }); }
   });
