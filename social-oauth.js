@@ -147,7 +147,8 @@ export function registerSocialOAuth(app, requireUser) {
       const params = { grant_type: "authorization_code", code, redirect_uri: callback(provider), client_id: process.env[p.client], client_secret: process.env[p.secret] };
       if (provider === "tiktok") { delete params.client_id; params.client_key = process.env[p.client]; }
       const tokens = provider === "meta"
-        ? await (async () => { const u = new URL(p.token); for (const [k,v] of Object.entries(params)) u.searchParams.set(k, String(v)); const r = await fetch(u); const d = await r.json(); if (!r.ok || d.error) throw new Error(d.error?.message || "Échange Meta refusé."); return d; })()\n        : await tokenRequest(p.token, params, false);
+        ? await (async () => { const u = new URL(p.token); for (const [k,v] of Object.entries(params)) u.searchParams.set(k, String(v)); const r = await fetch(u); const d = await r.json(); if (!r.ok || d.error) throw new Error(d.error?.message || "Échange Meta refusé."); return d; })()
+        : await tokenRequest(p.token, params, false);
       const access = tokens.access_token || tokens.data?.access_token;
       const refresh = tokens.refresh_token || tokens.data?.refresh_token || null;
       if (!access) throw new Error("Le réseau n'a pas retourné de jeton.");
