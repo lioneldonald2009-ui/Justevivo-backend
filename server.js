@@ -7,6 +7,7 @@ import Groq from "groq-sdk";
 import { removeSilenceFromVideo, removeTimeRangesFromVideo, extractCompressedAudio, enhanceVideoAudio, renderVideoClip, composeVideoWithAssets } from "./video-processing.js";
 import dotenv from "dotenv";
 import DodoPayments from "dodopayments";
+import { assembleGeneratedVideos } from "./ai-video-assembly.js";
 
 dotenv.config();
 
@@ -653,6 +654,32 @@ app.get("/api/ai-video/tasks/:taskId", requireUser, async (req,res) => {
     }
     res.json({ success:true, task });
   } catch(e) { res.status(502).json({ error:"Impossible de récupérer l'état de la génération." }); }
+});
+
+
+app.post("/api/ai-video/assemble", limit("ai-video-assemble", 4, 60*60*1000), requireUser, async (req,res) => {
+ const ids=Array.isArray(req.body?.taskIds)?[...new Set(req.body.taskIds.map(x=>String(x).replace(/[^a-zA-Z0-9_-]/g,"").slice(0,100)).filter(Boolean))]:[];
+ if(ids.length<2||ids.length>60)return res.status(400).json({error:"Sélectionnez entre 2 et 60 scènes."});
+ try{
+  const account=await getAccount(req.user.id,req.user.email);
+  if(!account.isAdmin&&account.plan!=="all_in_one")return res.status(403).json({error:"L’assemblage IA nécessite ALL-IN-ONE.",code:"PLAN_REQUIRED"});
+  if(!RUNWAY_API_KEY)return res.status(503).json({error:"Le moteur vidéo IA n’est pas configuré."});
+  const urls=[];
+  for(const id of ids){
+   if(!account.isAdmin){const owned=await sbGet("usage?user_id=eq."+req.user.id+"&job_id=eq."+encodeURIComponent(id)+"&kind=eq.ai_video_spend&select=id&limit=1");if(!owned.length)return res.status(404).json({error:"Une scène est introuvable pour ce compte."});}
+   const task=await runwayRequest("/tasks/"+encodeURIComponent(id));
+   if(!["SUCCEEDED","COMPLETED"].includes(String(task.status||"").toUpperCase()))return res.status(409).json({error:"Toutes les scènes doivent être terminées avant l’assemblage.",taskId:id});
+   const out=Array.isArray(task.output)?task.output:[task.output],item=out.find(x=>typeof x==="string"||(x&&typeof x.url==="string"));
+   const url=typeof item==="string"?item:item?.url;
+   if(!url||!url.startsWith("https://"))return res.status(502).json({error:"URL vidéo fournisseur invalide."});
+   urls.push(url);
+  }
+  const rendered=await assembleGeneratedVideos(urls,600);
+  res.setHeader("Content-Type","video/mp4");res.setHeader("Content-Disposition",'attachment; filename="justevivo-film-assemble.mp4"');res.setHeader("Content-Length",String(fs.statSync(rendered.outputPath).size));
+  const stream=fs.createReadStream(rendered.outputPath);
+  stream.on("error",()=>{fs.rmSync(rendered.outputDir,{recursive:true,force:true});if(!res.headersSent)res.status(500).end();});
+  stream.on("close",()=>fs.rmSync(rendered.outputDir,{recursive:true,force:true}));stream.pipe(res);
+ }catch(e){console.error("Assemblage vidéo IA :",e.message);res.status(502).json({error:e.message||"Impossible d’assembler les scènes."});}
 });
 
 // ===== Transcription =====
