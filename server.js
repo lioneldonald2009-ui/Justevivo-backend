@@ -8,6 +8,7 @@ import { removeSilenceFromVideo, removeTimeRangesFromVideo, extractCompressedAud
 import dotenv from "dotenv";
 import DodoPayments from "dodopayments";
 import { assembleGeneratedVideos } from "./ai-video-assembly.js";
+import { registerSocialOAuth } from "./social-oauth.js";
 
 dotenv.config();
 
@@ -180,6 +181,8 @@ async function requireUser(req, res, next) {
     res.status(503).json({ error: "Service de comptes indisponible. Réessayez." });
   }
 }
+
+registerSocialOAuth(app, requireUser);
 
 // Formule et consommation d'une personne
 async function getAccount(userId, userEmail) {
