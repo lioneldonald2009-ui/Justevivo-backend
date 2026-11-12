@@ -66,10 +66,11 @@ function isAdminUser(user) {
 
 // Formules : vidéos par mois, durée maximale (secondes), générateurs par jour
 const PLANS = {
-  free: { name: "Gratuit", videos: 3, maxSeconds: 3600, gen: 10 },
-  starter: { name: "Starter", videos: 25, maxSeconds: 3600, gen: 50 },
-  pro: { name: "Pro", videos: 50, maxSeconds: 3600, gen: 100 },
-  business: { name: "Business", videos: 110, maxSeconds: 3600, gen: 200 }
+  free: { name: "Gratuit", videos: 3, maxSeconds: 60, gen: 10, aiVideoCredits: 0 },
+  starter: { name: "Starter", videos: 25, maxSeconds: 300, gen: 50, aiVideoCredits: 0 },
+  pro: { name: "Pro", videos: 50, maxSeconds: 600, gen: 100, aiVideoCredits: 0 },
+  business: { name: "Business", videos: 110, maxSeconds: 1800, gen: 200, aiVideoCredits: 0 },
+  all_in_one: { name: "All-in-One", videos: 50, maxSeconds: 600, gen: 150, aiVideoCredits: 100 }
 };
 
 // ===== Paiements Dodo Payments =====
@@ -79,7 +80,8 @@ const DODO_ENV = String(process.env.DODO_PAYMENTS_ENVIRONMENT || "test_mode").tr
 const DODO_PRODUCTS = {
   starter: String(process.env.DODO_PRODUCT_STARTER || "").trim(),
   pro: String(process.env.DODO_PRODUCT_PRO || "").trim(),
-  business: String(process.env.DODO_PRODUCT_BUSINESS || "").trim()
+  business: String(process.env.DODO_PRODUCT_BUSINESS || "").trim(),
+  all_in_one: String(process.env.DODO_PRODUCT_ALL_IN_ONE || "").trim()
 };
 const DODO_ENABLED = ACCOUNTS_ON && Boolean(DODO_API_KEY && DODO_WEBHOOK_KEY && DODO_PRODUCTS.starter && DODO_PRODUCTS.pro && DODO_PRODUCTS.business);
 const PAY_ON = DODO_ENABLED;
@@ -319,7 +321,7 @@ async function settlePayments(userId) {
 function dodoPlanFromData(data) {
   const meta = data && data.metadata && typeof data.metadata === "object" ? data.metadata : {};
   const hinted = String(meta.plan || "").toLowerCase();
-  if (["starter","pro","business"].includes(hinted)) return hinted;
+  if (["starter","pro","business","all_in_one"].includes(hinted)) return hinted;
   const productId = String(data && (data.product_id || data.product && data.product.product_id) || "");
   return Object.keys(DODO_PRODUCTS).find(k => DODO_PRODUCTS[k] && DODO_PRODUCTS[k] === productId) || "";
 }
@@ -494,12 +496,12 @@ app.get("/api/me", requireUser, async (req, res) => {
   }
 });
 
-// Checkout récurrent Dodo : les trois produits doivent être configurés en abonnement mensuel.
+// Checkout récurrent Dodo : produits mensuels configurés dans l'espace Dodo.
 app.post("/api/me/pay/create", limit("pay", 10, 10 * 60 * 1000), requireUser, async (req, res) => {
   if (!DODO_ENABLED || !dodo) return res.status(503).json({ error: "Le paiement Dodo n'est pas encore configuré.", code: "PAYMENTS_NOT_CONFIGURED" });
   if (isAdminUser(req.user)) return res.status(403).json({ error: "Le compte administrateur bénéficie déjà de tous les accès.", code: "ADMIN" });
   const plan = String(req.body && req.body.plan || "").toLowerCase();
-  if (!["starter","pro","business"].includes(plan) || !DODO_PRODUCTS[plan]) return res.status(400).json({ error: "Formule inconnue." });
+  if (!["starter","pro","business","all_in_one"].includes(plan) || !DODO_PRODUCTS[plan]) return res.status(400).json({ error: "Formule inconnue." });
   try {
     const session = await dodo.checkoutSessions.create({
       product_cart: [{ product_id: DODO_PRODUCTS[plan], quantity: 1 }],
@@ -568,6 +570,90 @@ async function correctTranscriptSegments(groq, segments, language) {
   }
   return corrected;
 }
+
+// ===== Générateur vidéo IA JUSTEVIVO (Runway Dev) =====
+const RUNWAY_API_KEY = String(process.env.RUNWAYML_API_SECRET || "").trim();
+const RUNWAY_MODEL = String(process.env.JV_VIDEO_MODEL || "wan3").trim();
+const RUNWAY_CREDITS_PER_SECOND = Number(process.env.JV_VIDEO_CREDITS_PER_SECOND || 5);
+const RUNWAY_API_BASE = "https://api.dev.runwayml.com/v1";
+async function runwayRequest(pathname, options = {}) {
+  const response = await fetch(RUNWAY_API_BASE + pathname, {
+    method: options.method || "GET",
+    headers: {
+      Authorization: "Bearer " + RUNWAY_API_KEY,
+      "X-Runway-Version": "2024-11-06",
+      ...(options.body ? { "Content-Type": "application/json" } : {})
+    },
+    ...(options.body ? { body: JSON.stringify(options.body) } : {})
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.error || payload.message || "Le fournisseur vidéo IA a refusé la demande.");
+    error.status = response.status;
+    throw error;
+  }
+  return payload;
+}
+async function getAiVideoWallet(userId, plan) {
+  const start = new Date();
+  start.setUTCDate(1); start.setUTCHours(0,0,0,0);
+  const since = encodeURIComponent(start.toISOString());
+  const rows = await sbGet("usage?user_id=eq." + userId + "&kind=in.(ai_video_spend,ai_video_refund)&created_at=gte." + since + "&select=kind,seconds&limit=5000");
+  const spent = rows.reduce((n, row) => n + (row.kind === "ai_video_spend" ? Number(row.seconds || 0) : -Number(row.seconds || 0)), 0);
+  const included = PLANS[plan]?.aiVideoCredits || 0;
+  return { included, spent: Math.max(0, spent), balance: Math.max(0, included - spent), creditsPerSecond: RUNWAY_CREDITS_PER_SECOND };
+}
+app.get("/api/ai-video/config", requireUser, async (req,res) => {
+  try {
+    const account = await getAccount(req.user.id, req.user.email);
+    const wallet = await getAiVideoWallet(req.user.id, account.plan);
+    res.json({ enabled: Boolean(RUNWAY_API_KEY), provider: "Runway Dev", model: RUNWAY_MODEL, maxFinalDurationSeconds: 600, maxSceneDurationSeconds: 10, resolution: "480p", plan: account.plan, planName: account.limits.name, wallet, requiresAllInOne: account.plan !== "all_in_one" && !account.isAdmin });
+  } catch (e) { res.status(503).json({ error: "Impossible de charger les crédits vidéo IA." }); }
+});
+app.post("/api/ai-video/generate", limit("ai-video-generate", 10, 60*60*1000), requireUser, async (req,res) => {
+  if (!RUNWAY_API_KEY) return res.status(503).json({ error: "Le moteur vidéo IA n'est pas encore configuré sur le serveur.", code: "AI_VIDEO_NOT_CONFIGURED" });
+  const account = await getAccount(req.user.id, req.user.email);
+  if (!account.isAdmin && account.plan !== "all_in_one") return res.status(403).json({ error: "Le générateur vidéo IA nécessite la formule ALL-IN-ONE.", code: "PLAN_REQUIRED" });
+  const prompt = String(req.body?.prompt || "").trim().slice(0, 1800);
+  const duration = Math.max(5, Math.min(10, Math.round(Number(req.body?.duration) || 5)));
+  const ratio = ["720:1280","1280:720","960:960"].includes(req.body?.ratio) ? req.body.ratio : "720:1280";
+  if (prompt.length < 12) return res.status(400).json({ error: "Décrivez la scène avec au moins 12 caractères." });
+  const cost = duration * RUNWAY_CREDITS_PER_SECOND;
+  let wallet;
+  try { wallet = await getAiVideoWallet(req.user.id, account.plan); }
+  catch (_) { return res.status(503).json({ error: "Impossible de vérifier votre solde de crédits." }); }
+  if (!account.isAdmin && wallet.balance < cost) return res.status(402).json({ error: "Crédits IA insuffisants. Il vous reste " + wallet.balance + " crédits et cette scène en nécessite " + cost + ".", code: "AI_VIDEO_CREDITS" });
+  try {
+    const task = await runwayRequest("/text_to_video", { method:"POST", body:{ model:RUNWAY_MODEL, promptText:prompt, ratio, duration } });
+    if (!task.id) throw new Error("Le fournisseur n'a pas retourné d'identifiant de tâche.");
+    if (!account.isAdmin) await sbInsert("usage", { user_id:req.user.id, job_id:task.id, kind:"ai_video_spend", seconds:cost });
+    res.status(202).json({ success:true, taskId:task.id, estimatedCredits:cost, duration, wallet: await getAiVideoWallet(req.user.id, account.plan) });
+  } catch (e) {
+    console.error("Runway generation:",e.message);
+    res.status(e.status===429?429:502).json({ error:"La génération vidéo n'a pas pu démarrer. Aucun crédit n'a été débité.", code:"AI_VIDEO_PROVIDER_ERROR" });
+  }
+});
+app.get("/api/ai-video/tasks/:taskId", requireUser, async (req,res) => {
+  if (!RUNWAY_API_KEY) return res.status(503).json({ error:"Moteur vidéo IA non configuré." });
+  const taskId = String(req.params.taskId || "").replace(/[^a-zA-Z0-9_-]/g,"").slice(0,100);
+  if (!taskId) return res.status(400).json({ error:"Identifiant de tâche invalide." });
+  try {
+    const account = await getAccount(req.user.id, req.user.email);
+    if (!account.isAdmin) {
+      const owned = await sbGet("usage?user_id=eq."+req.user.id+"&job_id=eq."+encodeURIComponent(taskId)+"&kind=in.(ai_video_spend,ai_video_refund)&select=id&limit=1");
+      if (!owned.length) return res.status(404).json({ error:"Tâche introuvable pour ce compte." });
+    }
+    const task = await runwayRequest("/tasks/"+encodeURIComponent(taskId));
+    if (["FAILED","CANCELED"].includes(String(task.status||"").toUpperCase()) && !account.isAdmin) {
+      const refund = await sbGet("usage?user_id=eq."+req.user.id+"&job_id=eq."+encodeURIComponent(taskId)+"&kind=eq.ai_video_refund&select=id&limit=1");
+      if (!refund.length) {
+        const spend = await sbGet("usage?user_id=eq."+req.user.id+"&job_id=eq."+encodeURIComponent(taskId)+"&kind=eq.ai_video_spend&select=seconds&limit=1");
+        if (spend.length) await sbInsert("usage",{user_id:req.user.id,job_id:taskId,kind:"ai_video_refund",seconds:Number(spend[0].seconds||0)});
+      }
+    }
+    res.json({ success:true, task });
+  } catch(e) { res.status(502).json({ error:"Impossible de récupérer l'état de la génération." }); }
+});
 
 // ===== Transcription =====
 app.post(
