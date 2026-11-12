@@ -684,8 +684,6 @@ app.post("/api/ai-video/assemble", limit("ai-video-assemble", 4, 60*60*1000), re
 
 // ===== B-Roll stock et voix IA =====
 const PEXELS_API_KEY = String(process.env.PEXELS_API_KEY || "").trim();
-const ELEVENLABS_API_KEY = String(process.env.ELEVENLABS_API_KEY || "").trim();
-const ELEVENLABS_DEFAULT_VOICE = String(process.env.ELEVENLABS_DEFAULT_VOICE || "").trim();
 
 app.get("/api/media/broll", limit("broll-search", 30, 60 * 60 * 1000), requireUser, async (req,res) => {
   if (!PEXELS_API_KEY) return res.status(503).json({error:"Recherche B-Roll non configurée. Ajoutez PEXELS_API_KEY dans Render.",code:"PEXELS_NOT_CONFIGURED"});
@@ -701,20 +699,6 @@ app.get("/api/media/broll", limit("broll-search", 30, 60 * 60 * 1000), requireUs
   }catch(e){console.error("Pexels B-roll:",e.message);res.status(502).json({error:"La recherche de médias est momentanément indisponible."});}
 });
 
-app.post("/api/audio/tts", limit("ai-voice", 20, 60 * 60 * 1000), requireUser, async (req,res) => {
-  if(!ELEVENLABS_API_KEY)return res.status(503).json({error:"Voix IA non configurée. Ajoutez ELEVENLABS_API_KEY dans Render.",code:"VOICE_NOT_CONFIGURED"});
-  const text=String(req.body?.text||"").trim().slice(0,5000);
-  const voiceId=String(req.body?.voiceId||ELEVENLABS_DEFAULT_VOICE).trim().slice(0,100);
-  const modelId=String(req.body?.modelId||"eleven_multilingual_v2").trim();
-  if(text.length<2||!voiceId)return res.status(400).json({error:"Texte ou identifiant de voix manquant."});
-  if(!["eleven_multilingual_v2","eleven_turbo_v2_5"].includes(modelId))return res.status(400).json({error:"Modèle vocal non autorisé."});
-  try{
-    const response=await fetch("https://api.elevenlabs.io/v1/text-to-speech/"+encodeURIComponent(voiceId),{method:"POST",headers:{"xi-api-key":ELEVENLABS_API_KEY,"Content-Type":"application/json","Accept":"audio/mpeg"},body:JSON.stringify({text,model_id:modelId,voice_settings:{stability:0.5,similarity_boost:0.75}})});
-    if(!response.ok){const detail=await response.text();console.error("ElevenLabs TTS:",response.status,detail.slice(0,500));return res.status(response.status===429?429:502).json({error:response.status===429?"Quota vocal du fournisseur atteint.":"La synthèse vocale a échoué."});}
-    res.setHeader("Content-Type","audio/mpeg");res.setHeader("Content-Disposition",'attachment; filename="justevivo-voix-ia.mp3"');
-    const audio=Buffer.from(await response.arrayBuffer());res.setHeader("Content-Length",String(audio.length));res.send(audio);
-  }catch(e){console.error("ElevenLabs TTS:",e.message);res.status(502).json({error:"Le service vocal est momentanément indisponible."});}
-});
 
 // ===== Transcription =====
 app.post(
