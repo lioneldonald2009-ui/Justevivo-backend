@@ -608,7 +608,7 @@ app.get("/api/ai-video/config", requireUser, async (req,res) => {
   try {
     const account = await getAccount(req.user.id, req.user.email);
     const wallet = await getAiVideoWallet(req.user.id, account.plan);
-    res.json({ enabled: Boolean(RUNWAY_API_KEY), provider: "Runway Dev", model: RUNWAY_MODEL, maxFinalDurationSeconds: 600, maxSceneDurationSeconds: 10, resolution: "480p", plan: account.plan, planName: account.limits.name, wallet, requiresAllInOne: account.plan !== "all_in_one" && !account.isAdmin });
+    res.json({ enabled: Boolean(RUNWAY_API_KEY), provider: "Runway Dev", model: RUNWAY_MODEL, maxFinalDurationSeconds: 600, maxSceneDurationSeconds: 30, resolution: "480p", plan: account.plan, planName: account.limits.name, wallet, requiresAllInOne: account.plan !== "all_in_one" && !account.isAdmin });
   } catch (e) { res.status(503).json({ error: "Impossible de charger les crédits vidéo IA." }); }
 });
 app.post("/api/ai-video/generate", limit("ai-video-generate", 10, 60*60*1000), requireUser, async (req,res) => {
@@ -616,7 +616,7 @@ app.post("/api/ai-video/generate", limit("ai-video-generate", 10, 60*60*1000), r
   const account = await getAccount(req.user.id, req.user.email);
   if (!account.isAdmin && account.plan !== "all_in_one") return res.status(403).json({ error: "Le générateur vidéo IA nécessite la formule ALL-IN-ONE.", code: "PLAN_REQUIRED" });
   const prompt = String(req.body?.prompt || "").trim().slice(0, 1800);
-  const duration = Math.max(5, Math.min(10, Math.round(Number(req.body?.duration) || 5)));
+  const duration = Math.max(5, Math.min(30, Math.round(Number(req.body?.duration) || 5)));
   const ratio = ["720:1280","1280:720","960:960"].includes(req.body?.ratio) ? req.body.ratio : "720:1280";
   if (prompt.length < 12) return res.status(400).json({ error: "Décrivez la scène avec au moins 12 caractères." });
   const cost = duration * RUNWAY_CREDITS_PER_SECOND;
