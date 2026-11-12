@@ -700,6 +700,36 @@ app.get("/api/media/broll", limit("broll-search", 30, 60 * 60 * 1000), requireUs
 });
 
 
+// ===== B-Roll gratuit : Wikimedia Commons (API publique sans clé) =====
+app.get("/api/media/broll", limit("broll-search", 20, 60 * 60 * 1000), requireUser, async (req,res) => {
+  const query=String(req.query.q||"").trim().slice(0,100);
+  if(query.length<2)return res.status(400).json({error:"Saisissez au moins deux caractères."});
+  try{
+    const url=new URL("https://commons.wikimedia.org/w/api.php");
+    url.searchParams.set("action","query");
+    url.searchParams.set("generator","search");
+    url.searchParams.set("gsrsearch","filetype:video "+query);
+    url.searchParams.set("gsrnamespace","6");
+    url.searchParams.set("gsrlimit","30");
+    url.searchParams.set("prop","imageinfo");
+    url.searchParams.set("iiprop","url|extmetadata|mime|size");
+    url.searchParams.set("iiurlwidth","640");
+    url.searchParams.set("format","json");
+    url.searchParams.set("origin","*");
+    const response=await fetch(url,{headers:{"User-Agent":"JUSTEVIVO/1.0 (video editor; contact: support@justevivo.com)"}});
+    if(!response.ok)throw new Error("Commons HTTP "+response.status);
+    const data=await response.json();
+    const pages=Object.values(data.query?.pages||{});
+    const orientation=String(req.query.orientation||"all");
+    const videos=pages.map(page=>{
+      const info=page.imageinfo?.[0]||{},meta=info.extmetadata||{};
+      const width=Number(info.width)||0,height=Number(info.height)||0;
+      return {id:page.pageid,title:String(page.title||"").replace(/^File:/,""),url:info.url||"",thumbnail:info.thumburl||info.url||"",mime:info.mime||"",width,height,license:String(meta.LicenseShortName?.value||meta.License?.value||"Licence à vérifier").replace(/<[^>]*>/g,"").slice(0,100),artist:String(meta.Artist?.value||"Auteur indiqué sur Commons").replace(/<[^>]*>/g,"").slice(0,180),source:"Wikimedia Commons",pageUrl:"https://commons.wikimedia.org/wiki/"+encodeURIComponent(page.title||"")};
+    }).filter(v=>/^video\/(mp4|webm|ogg|quicktime)/i.test(v.mime)&&v.url&&(!orientation||(orientation==="all")||(orientation==="portrait"?v.height>=v.width:orientation==="landscape"?v.width>v.height:Math.abs(v.width-v.height)<Math.max(v.width,v.height)*0.15))).slice(0,18);
+    res.json({success:true,total_results:videos.length,videos});
+  }catch(e){console.error("Wikimedia B-roll:",e.message);res.status(502).json({error:"La bibliothèque vidéo gratuite est momentanément indisponible."});}
+});
+
 // ===== Transcription =====
 app.post(
   "/api/transcribe",
