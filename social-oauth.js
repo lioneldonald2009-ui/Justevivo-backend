@@ -69,7 +69,7 @@ function safeRedirect(value) {
   try { const u = new URL(value || SITE_URL); return u.origin === new URL(SITE_URL).origin ? u.toString() : SITE_URL; }
   catch { return SITE_URL; }
 }
-function redirectPage(res, message, ok = false) {
+function redirectPage(message, ok = false, res) {
   const u = new URL(SITE_URL);
   u.searchParams.set("social_connection", ok ? "success" : "error");
   u.searchParams.set("social_message", message.slice(0, 180));
@@ -127,7 +127,7 @@ export function registerSocialOAuth(app, requireUser) {
       const u = new URL(p.authorize);
       const params = { response_type: "code", client_id: process.env[p.client], redirect_uri: callback(provider), state, scope: p.scopes.join(provider === "meta" ? "," : " ") };
       if (provider === "tiktok") { delete params.client_id; params.client_key = process.env[p.client]; }
-      if (provider === "youtube") { params.access_type = "offline"; params.prompt = "consent"; include_granted_scopes: true; }
+      if (provider === "youtube") { params.access_type = "offline"; params.prompt = "consent"; params.include_granted_scopes = "true"; }
       for (const [k,v] of Object.entries(params)) u.searchParams.set(k, String(v));
       res.redirect(302, u.toString());
     } catch (e) { res.status(503).json({ error: e.message }); }
@@ -136,16 +136,16 @@ export function registerSocialOAuth(app, requireUser) {
   app.get("/api/social/callback/:provider", async (req, res) => {
     const provider = req.params.provider, p = PROVIDERS[provider];
     if (!p) return res.status(404).send("Réseau inconnu.");
-    if (req.query.error) return redirectPage(p.label + " : autorisation refusée.");
+    if (req.query.error) return redirectPage(p.label + " : autorisation refusée.", false, res);
     const state = String(req.query.state || ""), code = String(req.query.code || "");
-    if (!state || !code || !config(provider)) return redirectPage("Connexion " + p.label + " incomplète.");
+    if (!state || !code || !config(provider)) return redirectPage("Connexion " + p.label + " incomplète.", false, res);
     try {
       const states = await db("social_oauth_states?state=eq." + encodeURIComponent(state) + "&provider=eq." + provider, { method: "DELETE", headers: { Prefer: "return=representation" } });
       const saved = states[0];
-      if (!saved || new Date(saved.expires_at).getTime() < Date.now()) return redirectPage("Lien de connexion expiré. Réessayez.");
+      if (!saved || new Date(saved.expires_at).getTime() < Date.now()) return redirectPage("Lien de connexion expiré. Réessayez.", false, res);
       const params = { grant_type: "authorization_code", code, redirect_uri: callback(provider), client_id: process.env[p.client], client_secret: process.env[p.secret] };
-      if (provider === "tiktok") { delete params.client_id; delete params.client_secret; params.client_key = process.env[p.client]; params.client_secret = process.env[p.secret]; }
-      const tokens = await tokenRequest(p.token, params, provider === "tiktok");
+      if (provider === "tiktok") { delete params.client_id; params.client_key = process.env[p.client]; }
+      const tokens = provider === "meta"\n        ? await (async () => { const u = new URL(p.token); for (const [k,v] of Object.entries(params)) u.searchParams.set(k, String(v)); const r = await fetch(u); const d = await r.json(); if (!r.ok || d.error) throw new Error(d.error?.message || "Échange Meta refusé."); return d; })()\n        : await tokenRequest(p.token, params, false);
       const access = tokens.access_token || tokens.data?.access_token;
       const refresh = tokens.refresh_token || tokens.data?.refresh_token || null;
       if (!access) throw new Error("Le réseau n'a pas retourné de jeton.");
@@ -158,10 +158,10 @@ export function registerSocialOAuth(app, requireUser) {
         scopes, updated_at: new Date().toISOString()
       };
       await db("social_connections?on_conflict=user_id,provider", { method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify(row) });
-      redirectPage(p.label + " connecté.", true)(res);
+      redirectPage(p.label + " connecté.", true, res);
     } catch (e) {
       console.error("OAuth " + provider + ":", e.message);
-      redirectPage("Connexion " + p.label + " impossible. Vérifiez les autorisations et réessayez.");
+      redirectPage("Connexion " + p.label + " impossible. Vérifiez les autorisations et réessayez.", false, res);
     }
   });
 
