@@ -14,10 +14,18 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Sites autorisés à utiliser le serveur
-const ALLOWED = (process.env.ALLOWED_ORIGINS || "https://justevivo.pages.dev")
+const configuredOrigins = (process.env.ALLOWED_ORIGINS || "https://justevivo.pages.dev")
   .split(",")
   .map(s => s.trim())
   .filter(Boolean);
+// Origines locales utilisées par les WebViews Capacitor (Android/iOS).
+// Elles sont nécessaires aux appels API depuis les applications natives.
+const ALLOWED = [...new Set([
+  ...configuredOrigins,
+  "https://localhost",
+  "http://localhost",
+  "capacitor://localhost"
+])];
 
 const SITE_URL = process.env.SITE_URL || "https://justevivo.pages.dev/";
 
