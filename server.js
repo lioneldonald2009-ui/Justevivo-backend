@@ -1225,6 +1225,63 @@ app.post("/api/creative/generate-script", limit("creative-script", 8, 60 * 60 * 
   }
 });
 
+/* Recherche de musiques Jamendo. L'activation en production nécessite un accès API autorisé pour un service commercial. */
+app.get("/api/music/search", limit("music-search", 30, 60 * 60 * 1000), requireUser, async (req,res) => {
+  const clientId = process.env.JAMENDO_CLIENT_ID;
+  if (!clientId) return res.status(503).json({ error: "La bibliothèque musicale n'est pas encore configurée. L'administrateur doit ajouter JAMENDO_CLIENT_ID après validation des droits d'utilisation commerciale." });
+  const query = String(req.query.q || "").trim().slice(0,120);
+  if (query.length < 2) return res.status(400).json({ error: "Saisissez au moins 2 caractères pour rechercher une musique." });
+  try {
+    const url = new URL("https://api.jamendo.com/v3.0/tracks/");
+    url.search = new URLSearchParams({
+      client_id: clientId, format: "json", namesearch: query, limit: "20",
+      include: "licenses", audioformat: "mp32", audiodlformat: "mp32",
+      type: "single albumtrack", ccnd: "false", ccnc: "false"
+    }).toString();
+    const response = await fetch(url, { headers: { "Accept":"application/json" }, signal: AbortSignal.timeout(15000) });
+    if (!response.ok) throw new Error("Le catalogue musical ne répond pas correctement.");
+    const data = await response.json();
+    if (data.headers && data.headers.status !== "success") throw new Error("La recherche musicale a échoué.");
+    const tracks = (data.results || []).map(t => ({
+      id: String(t.id), name: t.name || "Titre sans nom", artist: t.artist_name || "Artiste inconnu",
+      album: t.album_name || "", duration: Number(t.duration) || 0,
+      image: t.album_image || t.image || "", previewUrl: t.audio || "",
+      downloadAllowed: t.audiodownload_allowed === true && Boolean(t.audiodownload),
+      downloadUrl: t.audiodownload_allowed === true ? (t.audiodownload || "") : "",
+      license: Array.isArray(t.licenses) ? t.licenses.map(l => ({name:l.name || l.license || "", url:l.url || l.ccurl || ""})) : [],
+      sourceUrl: t.shareurl || ""
+    }));
+    res.json({ success:true, source:"Jamendo", tracks });
+  } catch (error) {
+    console.error("Music search:", error.message);
+    res.status(502).json({ error: error.message || "Impossible de rechercher des musiques pour le moment." });
+  }
+});
+
+app.get("/api/music/download/:trackId", limit("music-download", 20, 60 * 60 * 1000), requireUser, async (req,res) => {
+  const clientId = process.env.JAMENDO_CLIENT_ID;
+  const trackId = String(req.params.trackId || "");
+  if (!clientId) return res.status(503).json({error:"La bibliothèque musicale n'est pas configurée."});
+  if (!/^\\d{1,15}$/.test(trackId)) return res.status(400).json({error:"Identifiant de musique invalide."});
+  try {
+    const url = new URL("https://api.jamendo.com/v3.0/tracks/");
+    url.search = new URLSearchParams({client_id:clientId,format:"json",id:trackId,include:"licenses",audiodlformat:"mp32"}).toString();
+    const lookup = await fetch(url, {signal:AbortSignal.timeout(15000)});
+    if (!lookup.ok) throw new Error("Impossible de vérifier les droits de cette musique.");
+    const data = await lookup.json();
+    const track = data.results && data.results[0];
+    if (!track || track.audiodownload_allowed !== true || !track.audiodownload) return res.status(403).json({error:"Cette musique n'autorise pas le téléchargement depuis JUSTEVIVO."});
+    const file = await fetch(track.audiodownload, {redirect:"follow",signal:AbortSignal.timeout(60000)});
+    if (!file.ok || !file.body) throw new Error("Le fichier musical n'est pas disponible.");
+    res.set({"Content-Type":file.headers.get("content-type") || "audio/mpeg","Content-Disposition":'attachment; filename="justevivo-musique.mp3"',"Cache-Control":"no-store"});
+    const {Readable}=await import("node:stream");
+    Readable.fromWeb(file.body).pipe(res);
+  } catch(error) {
+    console.error("Music download:",error.message);
+    if (!res.headersSent) res.status(502).json({error:"Le téléchargement de cette musique a échoué."});
+  }
+});
+
 /* Assemble le B-roll et/ou une piste voix off/musique dans un nouveau MP4. */
 app.post("/api/video/compose", limit("video-compose", 4, 60 * 60 * 1000), requireUser,
   uploadCompose.fields([{ name: "video", maxCount: 1 }, { name: "broll", maxCount: 1 }, { name: "audio", maxCount: 1 }]),
