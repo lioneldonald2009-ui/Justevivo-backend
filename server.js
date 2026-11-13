@@ -575,85 +575,126 @@ async function correctTranscriptSegments(groq, segments, language) {
   return corrected;
 }
 
-// ===== Générateur vidéo IA JUSTEVIVO (Runway Dev) =====
+// ===== Générateur vidéo IA JUSTEVIVO (LTX-2.5 + Runway fallback) =====
 const RUNWAY_API_KEY = String(process.env.RUNWAYML_API_SECRET || "").trim();
 const RUNWAY_MODEL = String(process.env.JV_VIDEO_MODEL || "wan3").trim();
 const RUNWAY_CREDITS_PER_SECOND = Number(process.env.JV_VIDEO_CREDITS_PER_SECOND || 5);
 const RUNWAY_API_BASE = "https://api.dev.runwayml.com/v1";
+const LTX_API_KEY = String(process.env.LTX_API_KEY || "").trim();
+const LTX_MODEL = String(process.env.JV_LTX_MODEL || "ltx-2-5-fast").trim();
+const LTX_API_BASE = "https://api.ltx.io";
 async function runwayRequest(pathname, options = {}) {
   const response = await fetch(RUNWAY_API_BASE + pathname, {
     method: options.method || "GET",
-    headers: {
-      Authorization: "Bearer " + RUNWAY_API_KEY,
-      "X-Runway-Version": "2024-11-06",
-      ...(options.body ? { "Content-Type": "application/json" } : {})
-    },
+    headers: { Authorization: "Bearer " + RUNWAY_API_KEY, "X-Runway-Version": "2024-11-06", ...(options.body ? { "Content-Type": "application/json" } : {}) },
+    ...(options.body ? { body: JSON.stringify(options.body) } : {})
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) { const error = new Error(payload.error || payload.message || "Le fournisseur vidéo IA a refusé la demande."); error.status = response.status; throw error; }
+  return payload;
+}
+async function ltxRequest(pathname, options = {}) {
+  const response = await fetch(LTX_API_BASE + pathname, {
+    method: options.method || "GET",
+    headers: { Authorization: "Bearer " + LTX_API_KEY, ...(options.body ? { "Content-Type": "application/json" } : {}) },
     ...(options.body ? { body: JSON.stringify(options.body) } : {})
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(payload.error || payload.message || "Le fournisseur vidéo IA a refusé la demande.");
-    error.status = response.status;
+    const detail = payload.error?.message || payload.message || payload.error || "Erreur du fournisseur LTX.";
+    const error = new Error(String(detail)); error.status = response.status; error.providerType = payload.error?.type || payload.type || "";
     throw error;
   }
   return payload;
 }
 async function getAiVideoWallet(userId, plan, isAdmin = false) {
   if (isAdmin) return { included: null, spent: 0, balance: null, unlimited: true, creditsPerSecond: RUNWAY_CREDITS_PER_SECOND };
-  const start = new Date();
-  start.setUTCDate(1); start.setUTCHours(0,0,0,0);
+  const start = new Date(); start.setUTCDate(1); start.setUTCHours(0,0,0,0);
   const since = encodeURIComponent(start.toISOString());
   const rows = await sbGet("usage?user_id=eq." + userId + "&kind=in.(ai_video_spend,ai_video_refund)&created_at=gte." + since + "&select=kind,seconds&limit=5000");
   const spent = rows.reduce((n, row) => n + (row.kind === "ai_video_spend" ? Number(row.seconds || 0) : -Number(row.seconds || 0)), 0);
   const included = PLANS[plan]?.aiVideoCredits || 0;
   return { included, spent: Math.max(0, spent), balance: Math.max(0, included - spent), creditsPerSecond: RUNWAY_CREDITS_PER_SECOND };
 }
+const LTX_DURATION_OPTIONS = [6,8,10,12,14,16,18,20];
+function nearestLtxDuration(value) { return LTX_DURATION_OPTIONS.reduce((best, n) => Math.abs(n-value) < Math.abs(best-value) ? n : best, 6); }
+function ltxResolutionAndRatio(resolution, ratio) {
+  const isPortrait = String(ratio).split(":")[1] > String(ratio).split(":")[0];
+  const isSquare = String(ratio).split(":")[0] === String(ratio).split(":")[1];
+  const tier = resolution === "1080p" ? 1080 : 720;
+  return isSquare ? tier + "x" + tier : isPortrait ? tier + "x" + Math.round(tier * 16 / 9) : Math.round(tier * 16 / 9) + "x" + tier;
+}
 app.get("/api/ai-video/config", requireUser, async (req,res) => {
   try {
     const account = await getAccount(req.user.id, req.user.email);
     const wallet = await getAiVideoWallet(req.user.id, account.plan, account.isAdmin);
-    res.json({ enabled: Boolean(RUNWAY_API_KEY), provider: "Runway Dev", model: RUNWAY_MODEL, maxFinalDurationSeconds: 600, maxSceneDurationSeconds: 30, resolutions: ["480p","720p","1080p"], defaultResolution: "720p", plan: account.plan, planName: account.limits.name, wallet, requiresAllInOne: account.plan !== "all_in_one" && !account.isAdmin });
+    const provider = LTX_API_KEY ? "LTX" : "Runway Dev";
+    res.json({ enabled: Boolean(LTX_API_KEY || RUNWAY_API_KEY), provider, model: LTX_API_KEY ? LTX_MODEL : RUNWAY_MODEL, maxFinalDurationSeconds: 600, maxSceneDurationSeconds: LTX_API_KEY ? 20 : 30, resolutions: LTX_API_KEY ? ["720p","1080p"] : ["480p","720p","1080p"], defaultResolution: "720p", plan: account.plan, planName: account.limits.name, wallet, requiresAllInOne: account.plan !== "all_in_one" && !account.isAdmin, providerBilling: LTX_API_KEY ? "LTX facture chaque seconde générée directement sur le compte LTX." : "Facturation selon le fournisseur Runway." });
   } catch (e) { res.status(503).json({ error: "Impossible de charger les crédits vidéo IA." }); }
 });
 app.post("/api/ai-video/generate", limit("ai-video-generate", 10, 60*60*1000), requireUser, async (req,res) => {
-  if (!RUNWAY_API_KEY) return res.status(503).json({ error: "Le moteur vidéo IA n'est pas encore configuré sur le serveur.", code: "AI_VIDEO_NOT_CONFIGURED" });
+  const useLtx = Boolean(LTX_API_KEY);
+  if (!useLtx && !RUNWAY_API_KEY) return res.status(503).json({ error: "Aucun moteur vidéo IA n'est configuré sur le serveur.", code: "AI_VIDEO_NOT_CONFIGURED" });
   const account = await getAccount(req.user.id, req.user.email);
   if (!account.isAdmin && account.plan !== "all_in_one") return res.status(403).json({ error: "Le générateur vidéo IA nécessite la formule ALL-IN-ONE.", code: "PLAN_REQUIRED" });
   const prompt = String(req.body?.prompt || "").trim().slice(0, 1800);
-  const duration = Math.max(5, Math.min(30, Math.round(Number(req.body?.duration) || 5)));
+  const requestedDuration = Math.max(5, Math.min(30, Math.round(Number(req.body?.duration) || 5)));
+  const duration = useLtx ? nearestLtxDuration(requestedDuration) : requestedDuration;
   const resolution = ["480p","720p","1080p"].includes(req.body?.resolution) ? req.body.resolution : "720p";
-  const allowedRatios = {
-    "480p": ["480:832","832:480","624:624"],
-    "720p": ["720:1280","1280:720","960:960"],
-    "1080p": ["1080:1920","1920:1080","1440:1440"]
-  };
+  const allowedRatios = { "480p":["480:832","832:480","624:624"], "720p":["720:1280","1280:720","960:960"], "1080p":["1080:1920","1920:1080","1440:1440"] };
   const ratio = allowedRatios[resolution].includes(req.body?.ratio) ? req.body.ratio : allowedRatios[resolution][0];
   const creditsPerSecond = resolution === "1080p" ? 20 : resolution === "720p" ? 10 : 5;
   if (prompt.length < 12) return res.status(400).json({ error: "Décrivez la scène avec au moins 12 caractères." });
   const cost = duration * creditsPerSecond;
   let wallet;
-  try { wallet = await getAiVideoWallet(req.user.id, account.plan); }
+  try { wallet = await getAiVideoWallet(req.user.id, account.plan, account.isAdmin); }
   catch (_) { return res.status(503).json({ error: "Impossible de vérifier votre solde de crédits." }); }
-  if (!account.isAdmin && wallet.balance < cost) return res.status(402).json({ error: "Crédits IA insuffisants. Il vous reste " + wallet.balance + " crédits et cette scène en nécessite " + cost + ".", code: "AI_VIDEO_CREDITS" });
+  if (!account.isAdmin && wallet.balance < cost) return res.status(402).json({ error: "Crédits IA JUSTEVIVO insuffisants. Il vous reste " + wallet.balance + " crédits et cette scène en nécessite " + cost + ".", code: "AI_VIDEO_CREDITS" });
   try {
-    const task = await runwayRequest("/text_to_video", { method:"POST", body:{ model:RUNWAY_MODEL, promptText:prompt, ratio, duration } });
-    if (!task.id) throw new Error("Le fournisseur n'a pas retourné d'identifiant de tâche.");
-    if (!account.isAdmin) await sbInsert("usage", { user_id:req.user.id, job_id:task.id, kind:"ai_video_spend", seconds:cost });
-    res.status(202).json({ success:true, taskId:task.id, estimatedCredits:cost, duration, resolution, wallet: await getAiVideoWallet(req.user.id, account.plan, account.isAdmin) });
+    let task;
+    let taskId;
+    if (useLtx) {
+      const resolutionValue = ltxResolutionAndRatio(resolution, ratio);
+      task = await ltxRequest("/v2/text-to-video", { method:"POST", body:{ model:LTX_MODEL, prompt, duration, resolution:resolutionValue, fps:24, generate_audio:true } });
+      if (!task.id) throw new Error("LTX n'a pas retourné d'identifiant de tâche.");
+      taskId = "ltx_" + task.id;
+    } else {
+      task = await runwayRequest("/text_to_video", { method:"POST", body:{ model:RUNWAY_MODEL, promptText:prompt, ratio, duration } });
+      if (!task.id) throw new Error("Runway n'a pas retourné d'identifiant de tâche.");
+      taskId = task.id;
+    }
+    if (!account.isAdmin) await sbInsert("usage", { user_id:req.user.id, job_id:taskId, kind:"ai_video_spend", seconds:cost });
+    res.status(202).json({ success:true, taskId, estimatedCredits:cost, duration, requestedDuration, resolution, provider:useLtx?"LTX":"Runway Dev", wallet: await getAiVideoWallet(req.user.id, account.plan, account.isAdmin) });
   } catch (e) {
-    console.error("Runway generation:",e.message);
-    res.status(e.status===429?429:502).json({ error:"La génération vidéo n'a pas pu démarrer. Aucun crédit n'a été débité.", code:"AI_VIDEO_PROVIDER_ERROR" });
+    console.error((useLtx?"LTX":"Runway")+" generation:",e.message);
+    const insufficient = /insufficient_funds|not enough credits|insufficient.*credit/i.test(e.message + " " + e.providerType);
+    res.status(insufficient?402:e.status===429?429:502).json({ error: insufficient ? "Le solde de crédits de votre compte LTX est insuffisant. Aucun rendu n'a été lancé." : "La génération vidéo n'a pas pu démarrer. Aucun crédit JUSTEVIVO n'a été débité.", code:insufficient?"LTX_INSUFFICIENT_FUNDS":"AI_VIDEO_PROVIDER_ERROR" });
   }
 });
 app.get("/api/ai-video/tasks/:taskId", requireUser, async (req,res) => {
-  if (!RUNWAY_API_KEY) return res.status(503).json({ error:"Moteur vidéo IA non configuré." });
-  const taskId = String(req.params.taskId || "").replace(/[^a-zA-Z0-9_-]/g,"").slice(0,100);
+  const rawTaskId = String(req.params.taskId || "");
+  const isLtx = rawTaskId.startsWith("ltx_");
+  const taskId = rawTaskId.replace(/^ltx_/,"").replace(/[^a-zA-Z0-9_-]/g,"").slice(0,100);
   if (!taskId) return res.status(400).json({ error:"Identifiant de tâche invalide." });
+  if (isLtx ? !LTX_API_KEY : !RUNWAY_API_KEY) return res.status(503).json({ error:"Moteur vidéo IA non configuré." });
   try {
     const account = await getAccount(req.user.id, req.user.email);
     if (!account.isAdmin) {
-      const owned = await sbGet("usage?user_id=eq."+req.user.id+"&job_id=eq."+encodeURIComponent(taskId)+"&kind=in.(ai_video_spend,ai_video_refund)&select=id&limit=1");
+      const owned = await sbGet("usage?user_id=eq."+req.user.id+"&job_id=eq."+encodeURIComponent(rawTaskId)+"&kind=in.(ai_video_spend,ai_video_refund)&select=id&limit=1");
       if (!owned.length) return res.status(404).json({ error:"Tâche introuvable pour ce compte." });
+    }
+    if (isLtx) {
+      const result = await ltxRequest("/v2/text-to-video/"+encodeURIComponent(taskId));
+      const status = String(result.status||"").toLowerCase();
+      const task = { ...result, status: status==="completed"?"SUCCEEDED":status==="failed"?"FAILED":status==="pending"?"PENDING":"RUNNING", output: result.result?.video_url ? [result.result.video_url] : [] };
+      if (status==="failed" && !account.isAdmin) {
+        const refund = await sbGet("usage?user_id=eq."+req.user.id+"&job_id=eq."+encodeURIComponent(rawTaskId)+"&kind=eq.ai_video_refund&select=id&limit=1");
+        if (!refund.length) {
+          const spend = await sbGet("usage?user_id=eq."+req.user.id+"&job_id=eq."+encodeURIComponent(rawTaskId)+"&kind=eq.ai_video_spend&select=seconds&limit=1");
+          if (spend.length) await sbInsert("usage",{user_id:req.user.id,job_id:rawTaskId,kind:"ai_video_refund",seconds:Number(spend[0].seconds||0)});
+        }
+      }
+      return res.json({ success:true, task });
     }
     const task = await runwayRequest("/tasks/"+encodeURIComponent(taskId));
     if (["FAILED","CANCELED"].includes(String(task.status||"").toUpperCase()) && !account.isAdmin) {
@@ -664,24 +705,23 @@ app.get("/api/ai-video/tasks/:taskId", requireUser, async (req,res) => {
       }
     }
     res.json({ success:true, task });
-  } catch(e) { res.status(502).json({ error:"Impossible de récupérer l'état de la génération." }); }
+  } catch(e) { console.error("AI video task:",e.message); res.status(502).json({ error:"Impossible de récupérer l'état de la génération." }); }
 });
-
-
 app.post("/api/ai-video/assemble", limit("ai-video-assemble", 4, 60*60*1000), requireUser, async (req,res) => {
- const ids=Array.isArray(req.body?.taskIds)?[...new Set(req.body.taskIds.map(x=>String(x).replace(/[^a-zA-Z0-9_-]/g,"").slice(0,100)).filter(Boolean))]:[];
+ const ids=Array.isArray(req.body?.taskIds)?[...new Set(req.body.taskIds.map(x=>String(x).slice(0,110)).filter(x=>/^(ltx_)?[a-zA-Z0-9_-]+$/.test(x)))]:[];
  if(ids.length<2||ids.length>60)return res.status(400).json({error:"Sélectionnez entre 2 et 60 scènes."});
  try{
   const account=await getAccount(req.user.id,req.user.email);
   if(!account.isAdmin&&account.plan!=="all_in_one")return res.status(403).json({error:"L’assemblage IA nécessite ALL-IN-ONE.",code:"PLAN_REQUIRED"});
-  if(!RUNWAY_API_KEY)return res.status(503).json({error:"Le moteur vidéo IA n’est pas configuré."});
   const urls=[];
-  for(const id of ids){
-   if(!account.isAdmin){const owned=await sbGet("usage?user_id=eq."+req.user.id+"&job_id=eq."+encodeURIComponent(id)+"&kind=eq.ai_video_spend&select=id&limit=1");if(!owned.length)return res.status(404).json({error:"Une scène est introuvable pour ce compte."});}
-   const task=await runwayRequest("/tasks/"+encodeURIComponent(id));
-   if(!["SUCCEEDED","COMPLETED"].includes(String(task.status||"").toUpperCase()))return res.status(409).json({error:"Toutes les scènes doivent être terminées avant l’assemblage.",taskId:id});
-   const out=Array.isArray(task.output)?task.output:[task.output],item=out.find(x=>typeof x==="string"||(x&&typeof x.url==="string"));
-   const url=typeof item==="string"?item:item?.url;
+  for(const fullId of ids){
+   const isLtx=fullId.startsWith("ltx_"),id=fullId.replace(/^ltx_/,"");
+   if(isLtx?!LTX_API_KEY:!RUNWAY_API_KEY)return res.status(503).json({error:"Un moteur vidéo utilisé par ces scènes n’est plus configuré."});
+   if(!account.isAdmin){const owned=await sbGet("usage?user_id=eq."+req.user.id+"&job_id=eq."+encodeURIComponent(fullId)+"&kind=eq.ai_video_spend&select=id&limit=1");if(!owned.length)return res.status(404).json({error:"Une scène est introuvable pour ce compte."});}
+   const task=isLtx?await ltxRequest("/v2/text-to-video/"+encodeURIComponent(id)):await runwayRequest("/tasks/"+encodeURIComponent(id));
+   const completed=isLtx?String(task.status).toLowerCase()==="completed":["SUCCEEDED","COMPLETED"].includes(String(task.status||"").toUpperCase());
+   if(!completed)return res.status(409).json({error:"Toutes les scènes doivent être terminées avant l’assemblage.",taskId:fullId});
+   const url=isLtx?task.result?.video_url:(()=>{const out=Array.isArray(task.output)?task.output:[task.output],item=out.find(x=>typeof x==="string"||(x&&typeof x.url==="string"));return typeof item==="string"?item:item?.url;})();
    if(!url||!url.startsWith("https://"))return res.status(502).json({error:"URL vidéo fournisseur invalide."});
    urls.push(url);
   }
