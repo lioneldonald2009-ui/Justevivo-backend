@@ -190,7 +190,7 @@ async function getAccount(userId, userEmail) {
     return {
       plan: "business",
       planUntil: null,
-      limits: { name: "Administrateur", videos: 1000000000, maxSeconds: 1000000000, gen: 1000000000 },
+      limits: { name: "Administrateur", videos: 1000000000, maxSeconds: 1000000000, gen: 1000000000, aiVideoCredits: 1000000000 },
       jobs: new Map(),
       generatedToday: 0,
       isAdmin: true
@@ -598,7 +598,8 @@ async function runwayRequest(pathname, options = {}) {
   }
   return payload;
 }
-async function getAiVideoWallet(userId, plan) {
+async function getAiVideoWallet(userId, plan, isAdmin = false) {
+  if (isAdmin) return { included: null, spent: 0, balance: null, unlimited: true, creditsPerSecond: RUNWAY_CREDITS_PER_SECOND };
   const start = new Date();
   start.setUTCDate(1); start.setUTCHours(0,0,0,0);
   const since = encodeURIComponent(start.toISOString());
@@ -610,7 +611,7 @@ async function getAiVideoWallet(userId, plan) {
 app.get("/api/ai-video/config", requireUser, async (req,res) => {
   try {
     const account = await getAccount(req.user.id, req.user.email);
-    const wallet = await getAiVideoWallet(req.user.id, account.plan);
+    const wallet = await getAiVideoWallet(req.user.id, account.plan, account.isAdmin);
     res.json({ enabled: Boolean(RUNWAY_API_KEY), provider: "Runway Dev", model: RUNWAY_MODEL, maxFinalDurationSeconds: 600, maxSceneDurationSeconds: 30, resolution: "480p", plan: account.plan, planName: account.limits.name, wallet, requiresAllInOne: account.plan !== "all_in_one" && !account.isAdmin });
   } catch (e) { res.status(503).json({ error: "Impossible de charger les crédits vidéo IA." }); }
 });
