@@ -288,7 +288,14 @@ export async function composeVideoWithAssets(inputPath, options = {}) {
     const args = ["-y", "-hide_banner", "-i", inputPath];
     let brollInput = -1, audioInput = -1;
     if (brollPath) { args.push("-stream_loop", "-1", "-i", brollPath); brollInput = 1; }
-    if (audioPath) { args.push("-stream_loop", "-1", "-i", audioPath); audioInput = brollPath ? 2 : 1; }
+    if (audioPath) {
+      const clipStart = Math.max(0, Number(options.audioClipStart) || 0);
+      const requestedClipEnd = Number(options.audioClipEnd);
+      const clipDuration = Number.isFinite(requestedClipEnd) && requestedClipEnd > clipStart
+        ? Math.min(600, requestedClipEnd - clipStart) : 600;
+      args.push("-ss", clipStart.toFixed(3), "-t", clipDuration.toFixed(3), "-i", audioPath);
+      audioInput = brollPath ? 2 : 1;
+    }
     const filters = [];
     let videoMap = "0:v:0";
     if (brollInput >= 0) {
@@ -312,7 +319,14 @@ export async function composeVideoWithAssets(inputPath, options = {}) {
       const volume = Math.max(0, Math.min(1, options.audioVolume === undefined ? 0.22 : Number(options.audioVolume)));
       const fadeIn = Math.max(0, Math.min(15, Number(options.audioFadeIn) || 0));
       const fadeOut = Math.max(0, Math.min(15, Number(options.audioFadeOut) || 0));
+      const audioStart = Math.max(0, Math.min(duration - 0.1, Number(options.audioStart) || 0));
       const audioFilters = ["volume=" + volume.toFixed(2)];
+      if (audioStart > 0) {
+        const delayMs = Math.round(audioStart * 1000);
+        audioFilters.push("adelay=" + delayMs + "|" + delayMs);
+      }
+      audioFilters.push("apad=pad_dur=" + duration.toFixed(2));
+      audioFilters.push("atrim=duration=" + duration.toFixed(2));
       if (fadeIn > 0) audioFilters.push("afade=t=in:st=0:d=" + fadeIn.toFixed(2));
       if (fadeOut > 0) audioFilters.push("afade=t=out:st=" + Math.max(0, duration - fadeOut).toFixed(2) + ":d=" + fadeOut.toFixed(2));
       filters.push("[" + audioInput + ":a]" + audioFilters.join(",") + "[music]");
