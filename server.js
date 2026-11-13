@@ -1236,7 +1236,11 @@ app.get("/api/music/search", limit("music-search", 30, 60 * 60 * 1000), requireU
   if(query.length<2)return res.status(400).json({error:"Saisissez au moins 2 caractères."});
   try{
     const url=new URL("https://archive.org/advancedsearch.php");
-    url.search=new URLSearchParams({q:'mediatype:audio AND licenseurl:http*creativecommons.org* AND '+query.replace(/[+&|!(){}\[\]^"~*?:\\/]/g," "),"fl[]":"identifier","fl[]":"title","fl[]":"creator","fl[]":"downloads",rows:"35",page:"1",output:"json","sort[]":"downloads desc"}).toString();
+    const params=new URLSearchParams();
+    params.set("q",'mediatype:audio AND licenseurl:http*creativecommons.org* AND '+query.replace(/[+&|!(){}\[\]^"~*?:\\/]/g," "));
+    ["identifier","title","creator","downloads","licenseurl"].forEach(field=>params.append("fl[]",field));
+    params.set("rows","35");params.set("page","1");params.set("output","json");params.append("sort[]","downloads desc");
+    url.search=params.toString();
     const response=await fetch(url,{headers:{"Accept":"application/json","User-Agent":"JUSTEVIVO/1.0"},signal:AbortSignal.timeout(20000)});
     if(!response.ok)throw new Error("Internet Archive ne répond pas.");
     const data=await response.json(),docs=data.response&&Array.isArray(data.response.docs)?data.response.docs:[];
