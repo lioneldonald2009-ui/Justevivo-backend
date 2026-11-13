@@ -1202,10 +1202,17 @@ app.post("/api/creative/suggest-broll", limit("creative-broll", 10, 60 * 60 * 10
     ]);
     let parsed;
     try {
-      const clean = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-      parsed = JSON.parse(clean);
+      // Tolère les blocs Markdown et le texte parasite autour du JSON renvoyé par le modèle.
+      const text = String(raw || "").trim()
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/\s*```$/i, "")
+        .trim();
+      const first = text.indexOf("{");
+      const last = text.lastIndexOf("}");
+      if (first < 0 || last <= first) throw new Error("JSON absent");
+      parsed = JSON.parse(text.slice(first, last + 1));
     } catch (_) {
-      throw new Error("Le moteur IA a renvoyé un plan non exploitable. Relancez la génération.");
+      throw new Error("Le moteur IA n’a pas renvoyé un storyboard lisible. Réessayez avec un script plus précis.");
     }
     const scenes = Array.isArray(parsed.scenes) ? parsed.scenes.slice(0, 8).map(x => ({
       time: String(x.time || ""),
