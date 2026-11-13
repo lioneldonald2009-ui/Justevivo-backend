@@ -625,6 +625,7 @@ function ltxResolutionAndRatio(resolution, ratio) {
   return isSquare ? tier + "x" + tier : isPortrait ? tier + "x" + Math.round(tier * 16 / 9) : Math.round(tier * 16 / 9) + "x" + tier;
 }
 app.get("/api/ai-video/config", requireUser, async (req,res) => {
+  return res.status(410).json({ enabled:false, code:"AI_VIDEO_TEMPORARILY_DISABLED", message:"La génération vidéo IA est temporairement désactivée pendant la finalisation de JUSTEVIVO." });
   try {
     const account = await getAccount(req.user.id, req.user.email);
     const wallet = await getAiVideoWallet(req.user.id, account.plan, account.isAdmin);
@@ -633,6 +634,7 @@ app.get("/api/ai-video/config", requireUser, async (req,res) => {
   } catch (e) { res.status(503).json({ error: "Impossible de charger les crédits vidéo IA." }); }
 });
 app.post("/api/ai-video/generate", limit("ai-video-generate", 10, 60*60*1000), requireUser, async (req,res) => {
+  return res.status(410).json({ code:"AI_VIDEO_TEMPORARILY_DISABLED", error:"La génération vidéo IA est temporairement désactivée." });
   const useLtx = Boolean(LTX_API_KEY);
   if (!useLtx && !RUNWAY_API_KEY) return res.status(503).json({ error: "Aucun moteur vidéo IA n'est configuré sur le serveur.", code: "AI_VIDEO_NOT_CONFIGURED" });
   const account = await getAccount(req.user.id, req.user.email);
@@ -672,6 +674,7 @@ app.post("/api/ai-video/generate", limit("ai-video-generate", 10, 60*60*1000), r
   }
 });
 app.get("/api/ai-video/tasks/:taskId", requireUser, async (req,res) => {
+  return res.status(410).json({ code:"AI_VIDEO_TEMPORARILY_DISABLED", error:"Le générateur vidéo IA est temporairement désactivé." });
   const rawTaskId = String(req.params.taskId || "");
   const isLtx = rawTaskId.startsWith("ltx_");
   const taskId = rawTaskId.replace(/^ltx_/,"").replace(/[^a-zA-Z0-9_-]/g,"").slice(0,100);
@@ -708,6 +711,7 @@ app.get("/api/ai-video/tasks/:taskId", requireUser, async (req,res) => {
   } catch(e) { console.error("AI video task:",e.message); res.status(502).json({ error:"Impossible de récupérer l'état de la génération." }); }
 });
 app.post("/api/ai-video/assemble", limit("ai-video-assemble", 4, 60*60*1000), requireUser, async (req,res) => {
+ return res.status(410).json({ code:"AI_VIDEO_TEMPORARILY_DISABLED", error:"L’assemblage des scènes IA est temporairement désactivé." });
  const ids=Array.isArray(req.body?.taskIds)?[...new Set(req.body.taskIds.map(x=>String(x).slice(0,110)).filter(x=>/^(ltx_)?[a-zA-Z0-9_-]+$/.test(x)))]:[];
  if(ids.length<2||ids.length>60)return res.status(400).json({error:"Sélectionnez entre 2 et 60 scènes."});
  try{
