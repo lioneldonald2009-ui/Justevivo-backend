@@ -309,10 +309,17 @@ export async function composeVideoWithAssets(inputPath, options = {}) {
     }
     let audioMap = "0:a?";
     if (audioInput >= 0) {
-      const volume = Math.max(0, Math.min(1, Number(options.audioVolume) || 0.22));
-      filters.push("[" + audioInput + ":a]volume=" + volume.toFixed(2) + "[music]");
+      const volume = Math.max(0, Math.min(1, options.audioVolume === undefined ? 0.22 : Number(options.audioVolume)));
+      const fadeIn = Math.max(0, Math.min(15, Number(options.audioFadeIn) || 0));
+      const fadeOut = Math.max(0, Math.min(15, Number(options.audioFadeOut) || 0));
+      const audioFilters = ["volume=" + volume.toFixed(2)];
+      if (fadeIn > 0) audioFilters.push("afade=t=in:st=0:d=" + fadeIn.toFixed(2));
+      if (fadeOut > 0) audioFilters.push("afade=t=out:st=" + Math.max(0, duration - fadeOut).toFixed(2) + ":d=" + fadeOut.toFixed(2));
+      filters.push("[" + audioInput + ":a]" + audioFilters.join(",") + "[music]");
       if (hasMainAudio) {
-        filters.push("[0:a][music]amix=inputs=2:duration=first:dropout_transition=2[aout]");
+        const mainVolume = Math.max(0, Math.min(1, options.mainAudioVolume === undefined ? 1 : Number(options.mainAudioVolume)));
+        filters.push("[0:a]volume=" + mainVolume.toFixed(2) + "[original]");
+        filters.push("[original][music]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[aout]");
         audioMap = "[aout]";
       } else audioMap = "[music]";
     }
