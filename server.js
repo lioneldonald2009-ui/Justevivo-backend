@@ -1226,60 +1226,50 @@ app.post("/api/creative/generate-script", limit("creative-script", 8, 60 * 60 * 
 });
 
 /* Recherche de musiques Jamendo. L'activation en production nécessite un accès API autorisé pour un service commercial. */
+/* Bibliothèque musicale gratuite Internet Archive : CC0, CC BY et CC BY-SA uniquement. */
+const isCommercialMusicLicense = (value) => {
+  const u = String(value || "").toLowerCase().replace(/^http:\/\//, "https://").replace(/\/$/, "");
+  return /^https:\/\/creativecommons\.org\/(licenses\/(by|by-sa)\/(1\.0|2\.0|2\.5|3\.0|4\.0)|publicdomain\/zero\/(1\.0|2\.0))$/.test(u);
+};
 app.get("/api/music/search", limit("music-search", 30, 60 * 60 * 1000), requireUser, async (req,res) => {
-  const clientId = process.env.JAMENDO_CLIENT_ID;
-  if (!clientId) return res.status(503).json({ error: "La bibliothèque musicale n'est pas encore configurée. L'administrateur doit ajouter JAMENDO_CLIENT_ID après validation des droits d'utilisation commerciale." });
-  const query = String(req.query.q || "").trim().slice(0,120);
-  if (query.length < 2) return res.status(400).json({ error: "Saisissez au moins 2 caractères pour rechercher une musique." });
-  try {
-    const url = new URL("https://api.jamendo.com/v3.0/tracks/");
-    url.search = new URLSearchParams({
-      client_id: clientId, format: "json", namesearch: query, limit: "20",
-      include: "licenses", audioformat: "mp32", audiodlformat: "mp32",
-      type: "single albumtrack", ccnd: "false", ccnc: "false"
-    }).toString();
-    const response = await fetch(url, { headers: { "Accept":"application/json" }, signal: AbortSignal.timeout(15000) });
-    if (!response.ok) throw new Error("Le catalogue musical ne répond pas correctement.");
-    const data = await response.json();
-    if (data.headers && data.headers.status !== "success") throw new Error("La recherche musicale a échoué.");
-    const tracks = (data.results || []).map(t => ({
-      id: String(t.id), name: t.name || "Titre sans nom", artist: t.artist_name || "Artiste inconnu",
-      album: t.album_name || "", duration: Number(t.duration) || 0,
-      image: t.album_image || t.image || "", previewUrl: t.audio || "",
-      downloadAllowed: t.audiodownload_allowed === true && Boolean(t.audiodownload),
-      downloadUrl: t.audiodownload_allowed === true ? (t.audiodownload || "") : "",
-      license: Array.isArray(t.licenses) ? t.licenses.map(l => ({name:l.name || l.license || "", url:l.url || l.ccurl || ""})) : [],
-      sourceUrl: t.shareurl || ""
+  const query=String(req.query.q||"").trim().slice(0,120);
+  if(query.length<2)return res.status(400).json({error:"Saisissez au moins 2 caractères."});
+  try{
+    const url=new URL("https://archive.org/advancedsearch.php");
+    url.search=new URLSearchParams({q:'mediatype:audio AND licenseurl:http*creativecommons.org* AND '+query.replace(/[+&|!(){}\[\]^"~*?:\\/]/g," "),"fl[]":"identifier","fl[]":"title","fl[]":"creator","fl[]":"downloads",rows:"35",page:"1",output:"json","sort[]":"downloads desc"}).toString();
+    const response=await fetch(url,{headers:{"Accept":"application/json","User-Agent":"JUSTEVIVO/1.0"},signal:AbortSignal.timeout(20000)});
+    if(!response.ok)throw new Error("Internet Archive ne répond pas.");
+    const data=await response.json(),docs=data.response&&Array.isArray(data.response.docs)?data.response.docs:[];
+    const checked=await Promise.all(docs.slice(0,25).map(async doc=>{
+      try{
+        const mr=await fetch("https://archive.org/metadata/"+encodeURIComponent(doc.identifier),{signal:AbortSignal.timeout(12000)});
+        if(!mr.ok)return null;
+        const item=await mr.json(),md=item.metadata||{},license=md.licenseurl||md.license||"";
+        if(!isCommercialMusicLicense(license))return null;
+        const file=(item.files||[]).find(f=>f&&typeof f.name==="string"&&/\.(mp3|ogg|flac|wav)$/i.test(f.name)&&!/(spectrogram|thumb|metadata|torrent)/i.test(f.name)&&Number(f.size||0)<=100*1024*1024);
+        if(!file)return null;
+        const id=Buffer.from(JSON.stringify({id:doc.identifier,file:file.name})).toString("base64url");
+        return{id,name:String(md.title||doc.title||doc.identifier).slice(0,180),artist:String(md.creator||"Artiste non renseigné").slice(0,160),duration:Number(md.runtime)||0,previewUrl:"https://archive.org/download/"+encodeURIComponent(doc.identifier)+"/"+file.name.split("/").map(encodeURIComponent).join("/"),downloadAllowed:true,license:[{name:license.includes("by-sa")?"CC BY-SA":license.includes("zero")?"CC0":"CC BY",url:license}],sourceUrl:"https://archive.org/details/"+encodeURIComponent(doc.identifier),fileName:file.name.split("/").pop(),source:"Internet Archive"};
+      }catch(_){return null;}
     }));
-    res.json({ success:true, source:"Jamendo", tracks });
-  } catch (error) {
-    console.error("Music search:", error.message);
-    res.status(502).json({ error: error.message || "Impossible de rechercher des musiques pour le moment." });
-  }
+    res.json({success:true,source:"Internet Archive",tracks:checked.filter(Boolean),notice:"Seuls les items avec licence CC0, CC BY ou CC BY-SA sont proposés. Vérifiez l'attribution sur la fiche source."});
+  }catch(error){console.error("Internet Archive search:",error.message);res.status(502).json({error:error.message||"Recherche impossible."});}
 });
-
-app.get("/api/music/download/:trackId", limit("music-download", 20, 60 * 60 * 1000), requireUser, async (req,res) => {
-  const clientId = process.env.JAMENDO_CLIENT_ID;
-  const trackId = String(req.params.trackId || "");
-  if (!clientId) return res.status(503).json({error:"La bibliothèque musicale n'est pas configurée."});
-  if (!/^\\d{1,15}$/.test(trackId)) return res.status(400).json({error:"Identifiant de musique invalide."});
-  try {
-    const url = new URL("https://api.jamendo.com/v3.0/tracks/");
-    url.search = new URLSearchParams({client_id:clientId,format:"json",id:trackId,include:"licenses",audiodlformat:"mp32"}).toString();
-    const lookup = await fetch(url, {signal:AbortSignal.timeout(15000)});
-    if (!lookup.ok) throw new Error("Impossible de vérifier les droits de cette musique.");
-    const data = await lookup.json();
-    const track = data.results && data.results[0];
-    if (!track || track.audiodownload_allowed !== true || !track.audiodownload) return res.status(403).json({error:"Cette musique n'autorise pas le téléchargement depuis JUSTEVIVO."});
-    const file = await fetch(track.audiodownload, {redirect:"follow",signal:AbortSignal.timeout(60000)});
-    if (!file.ok || !file.body) throw new Error("Le fichier musical n'est pas disponible.");
-    res.set({"Content-Type":file.headers.get("content-type") || "audio/mpeg","Content-Disposition":'attachment; filename="justevivo-musique.mp3"',"Cache-Control":"no-store"});
-    const {Readable}=await import("node:stream");
-    Readable.fromWeb(file.body).pipe(res);
-  } catch(error) {
-    console.error("Music download:",error.message);
-    if (!res.headersSent) res.status(502).json({error:"Le téléchargement de cette musique a échoué."});
-  }
+app.get("/api/music/download/:trackId",limit("music-download",20,60*60*1000),requireUser,async(req,res)=>{
+  let info;try{info=JSON.parse(Buffer.from(String(req.params.trackId||""),"base64url").toString("utf8"));}catch(_){return res.status(400).json({error:"Identifiant invalide."});}
+  if(!info||typeof info.id!=="string"||!/^[a-zA-Z0-9._-]{1,120}$/.test(info.id)||typeof info.file!=="string"||info.file.length>300||info.file.split("/").some(p=>!p||p===".."))return res.status(400).json({error:"Identifiant invalide."});
+  try{
+    const mr=await fetch("https://archive.org/metadata/"+encodeURIComponent(info.id),{signal:AbortSignal.timeout(15000)});if(!mr.ok)throw new Error("Vérification impossible.");
+    const item=await mr.json(),license=item.metadata&&(item.metadata.licenseurl||item.metadata.license);
+    if(!isCommercialMusicLicense(license))return res.status(403).json({error:"Licence non autorisée pour l'intégration commerciale."});
+    const fm=(item.files||[]).find(f=>f.name===info.file);
+    if(!fm||!/\.(mp3|ogg|flac|wav)$/i.test(fm.name)||Number(fm.size||0)>100*1024*1024)return res.status(403).json({error:"Fichier indisponible ou trop volumineux."});
+    const target="https://archive.org/download/"+encodeURIComponent(info.id)+"/"+info.file.split("/").map(encodeURIComponent).join("/");
+    const file=await fetch(target,{redirect:"follow",signal:AbortSignal.timeout(90000)});if(!file.ok||!file.body)throw new Error("Téléchargement indisponible.");
+    const ext=info.file.split(".").pop().toLowerCase(),mime=({mp3:"audio/mpeg",ogg:"audio/ogg",flac:"audio/flac",wav:"audio/wav"})[ext]||"application/octet-stream";
+    res.set({"Content-Type":mime,"Content-Disposition":'attachment; filename="justevivo-musique.'+ext+'"',"Cache-Control":"no-store"});
+    const {Readable}=await import("node:stream");Readable.fromWeb(file.body).pipe(res);
+  }catch(error){console.error("Internet Archive download:",error.message);if(!res.headersSent)res.status(502).json({error:"Téléchargement musical impossible."});}
 });
 
 /* Assemble le B-roll et/ou une piste voix off/musique dans un nouveau MP4. */
