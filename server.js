@@ -326,7 +326,7 @@ async function settlePayments(userId) {
 function dodoPlanFromData(data) {
   const meta = data && data.metadata && typeof data.metadata === "object" ? data.metadata : {};
   const hinted = String(meta.plan || "").toLowerCase();
-  if (["starter","pro","business","all_in_one"].includes(hinted)) return hinted;
+  if (["starter","pro","business"].includes(hinted)) return hinted;
   const productId = String(data && (data.product_id || data.product && data.product.product_id) || "");
   return Object.keys(DODO_PRODUCTS).find(k => DODO_PRODUCTS[k] && DODO_PRODUCTS[k] === productId) || "";
 }
@@ -506,7 +506,7 @@ app.post("/api/me/pay/create", limit("pay", 10, 10 * 60 * 1000), requireUser, as
   if (!DODO_ENABLED || !dodo) return res.status(503).json({ error: "Le paiement Dodo n'est pas encore configuré.", code: "PAYMENTS_NOT_CONFIGURED" });
   if (isAdminUser(req.user)) return res.status(403).json({ error: "Le compte administrateur bénéficie déjà de tous les accès.", code: "ADMIN" });
   const plan = String(req.body && req.body.plan || "").toLowerCase();
-  if (!["starter","pro","business","all_in_one"].includes(plan) || !DODO_PRODUCTS[plan]) return res.status(400).json({ error: "Formule inconnue." });
+  if (!["starter","pro","business"].includes(plan) || !DODO_PRODUCTS[plan]) return res.status(400).json({ error: "Formule inconnue." });
   try {
     const session = await dodo.checkoutSessions.create({
       product_cart: [{ product_id: DODO_PRODUCTS[plan], quantity: 1 }],
