@@ -1305,7 +1305,10 @@ app.post("/api/video/compose", limit("video-compose", 4, 60 * 60 * 1000), requir
         audioVolume: req.body && req.body.audioVolume,
         mainAudioVolume: req.body && req.body.mainAudioVolume,
         audioFadeIn: req.body && req.body.audioFadeIn,
-        audioFadeOut: req.body && req.body.audioFadeOut
+        audioFadeOut: req.body && req.body.audioFadeOut,
+        audioStart: req.body && req.body.audioStart,
+        audioClipStart: req.body && req.body.audioClipStart,
+        audioClipEnd: req.body && req.body.audioClipEnd
       });
       res.set({
         "Content-Type": "video/mp4",
