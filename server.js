@@ -66,13 +66,15 @@ function isAdminUser(user) {
     String(user.email || "").trim().toLowerCase() === ADMIN_EMAIL);
 }
 
-// Formules : vidéos par mois, durée maximale (secondes), générateurs par jour
+// Formules JUSTEVIVO : vidéos traitées/mois, durée maximale (secondes), opérations IA/jour.
+// La génération de vidéos par IA est désactivée et n'est incluse dans aucune formule.
 const PLANS = {
   free: { name: "Gratuit", videos: 3, maxSeconds: 60, gen: 10, aiVideoCredits: 0 },
   starter: { name: "Starter", videos: 25, maxSeconds: 300, gen: 50, aiVideoCredits: 0 },
   pro: { name: "Pro", videos: 50, maxSeconds: 600, gen: 100, aiVideoCredits: 0 },
   business: { name: "Business", videos: 110, maxSeconds: 1800, gen: 200, aiVideoCredits: 0 },
-  all_in_one: { name: "All-in-One", videos: 50, maxSeconds: 600, gen: 150, aiVideoCredits: 100 }
+  // Compatibilité : conserve les comptes historiques sans leur attribuer de crédits de génération vidéo IA.
+  all_in_one: { name: "Ancienne formule All-in-One", videos: 50, maxSeconds: 600, gen: 150, aiVideoCredits: 0 }
 };
 
 // ===== Paiements Dodo Payments =====
@@ -82,8 +84,7 @@ const DODO_ENV = String(process.env.DODO_PAYMENTS_ENVIRONMENT || "test_mode").tr
 const DODO_PRODUCTS = {
   starter: String(process.env.DODO_PRODUCT_STARTER || "").trim(),
   pro: String(process.env.DODO_PRODUCT_PRO || "").trim(),
-  business: String(process.env.DODO_PRODUCT_BUSINESS || "").trim(),
-  all_in_one: String(process.env.DODO_PRODUCT_ALL_IN_ONE || "").trim()
+  business: String(process.env.DODO_PRODUCT_BUSINESS || "").trim()
 };
 const DODO_ENABLED = ACCOUNTS_ON && Boolean(DODO_API_KEY && DODO_WEBHOOK_KEY && DODO_PRODUCTS.starter && DODO_PRODUCTS.pro && DODO_PRODUCTS.business);
 const PAY_ON = DODO_ENABLED;
