@@ -4,7 +4,7 @@ import multer from "multer";
 import fs from "fs";
 import path from "path";
 import Groq from "groq-sdk";
-import { removeSilenceFromVideo, removeTimeRangesFromVideo, extractCompressedAudio, enhanceVideoAudio, renderVideoClip, composeVideoWithAssets } from "./video-processing.js";
+import { removeSilenceFromVideo, removeTimeRangesFromVideo, extractCompressedAudio, enhanceVideoAudio, renderVideoClip, composeVideoWithAssets, finalizeVideoExport } from "./video-processing.js";
 import dotenv from "dotenv";
 import DodoPayments from "dodopayments";
 import { assembleGeneratedVideos } from "./ai-video-assembly.js";
@@ -1375,6 +1375,39 @@ app.post("/api/video/compose", limit("video-compose", 4, 60 * 60 * 1000), requir
     }
   }
 );
+
+
+/* Finalisation MP4 du rendu navigateur : conserve la piste audio déjà mixée. */
+app.post("/api/video/finalize", limit("video-finalize", 5, 60 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
+  const input = req.file;
+  let result = null;
+  if (!input) return res.status(400).json({ error: "Le rendu vidéo à finaliser est absent." });
+  const duration = Number(req.body && req.body.duration);
+  if (!Number.isFinite(duration) || duration <= 0 || duration > 1800) {
+    fs.unlink(input.path, () => {});
+    return res.status(400).json({ error: "Durée de rendu invalide (maximum 30 minutes)." });
+  }
+  try {
+    result = await finalizeVideoExport(input.path, { duration });
+    res.set({
+      "Content-Type": "video/mp4",
+      "Content-Length": String(result.size),
+      "Content-Disposition": 'attachment; filename="justevivo-export.mp4"',
+      "X-JV-EXPORT-FORMAT": "mp4",
+      "X-JV-EXPORT-DURATION": String(result.duration)
+    });
+    res.sendFile(result.outputPath, error => {
+      fs.unlink(input.path, () => {});
+      if (result && result.outputDir) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});
+      if (error && !res.headersSent) res.status(500).end();
+    });
+  } catch (error) {
+    fs.unlink(input.path, () => {});
+    if (result && result.outputDir) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});
+    console.error("MP4 finalization:", error.message);
+    if (!res.headersSent) res.status(422).json({ error: error.message || "La finalisation MP4 a échoué." });
+  }
+});
 
 // ===== Traduction des sous-titres : conserve exactement les timings =====
 const SUBTITLE_LANGUAGES = {
