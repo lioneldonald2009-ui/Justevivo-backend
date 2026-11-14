@@ -1387,6 +1387,26 @@ app.post("/api/video/finalize", limit("video-finalize", 5, 60 * 60 * 1000), requ
     fs.unlink(input.path, () => {});
     return res.status(400).json({ error: "Durée de rendu invalide (maximum 30 minutes)." });
   }
+
+  // L'export est soumis à la durée maximale du forfait, même si le client
+  // appelle directement cette route sans passer par l'interface.
+  let account;
+  try {
+    account = await getAccount(req.user.id, req.user.email);
+  } catch (accountError) {
+    fs.unlink(input.path, () => {});
+    console.error("MP4 finalization account check:", accountError.message);
+    return res.status(503).json({ error: "Impossible de vérifier les limites de votre formule." });
+  }
+  if (!account.isAdmin && duration > account.limits.maxSeconds + 5) {
+    fs.unlink(input.path, () => {});
+    return res.status(403).json({
+      error: "Cette vidéo dépasse la durée maximale de la formule " + account.limits.name +
+        " (" + fmtLimit(account.limits.maxSeconds) + ").",
+      code: "DURATION"
+    });
+  }
+
   try {
     result = await finalizeVideoExport(input.path, { duration });
     res.set({
