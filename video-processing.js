@@ -350,3 +350,35 @@ export async function composeVideoWithAssets(inputPath, options = {}) {
     throw error;
   }
 }
+
+
+// Finalise le rendu navigateur WebM en MP4 universel (H.264 + AAC).
+// Le mixage voix originale, musique et effets est déjà effectué côté studio
+// avant l'envoi : FFmpeg conserve la piste audio du conteneur source.
+export async function finalizeVideoExport(inputPath, options = {}) {
+  if (!ffmpegPath) throw new Error("Le moteur FFmpeg n'est pas disponible sur ce serveur.");
+  const requestedDuration = Number(options.duration);
+  if (!Number.isFinite(requestedDuration) || requestedDuration <= 0 || requestedDuration > 1800) {
+    throw new Error("La durée du rendu doit être comprise entre 1 seconde et 30 minutes.");
+  }
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jv-export-"));
+  const outputPath = path.join(dir, crypto.randomUUID() + ".mp4");
+  try {
+    await run(ffmpegPath, [
+      "-y", "-hide_banner", "-i", inputPath,
+      "-map", "0:v:0", "-map", "0:a?",
+      "-t", requestedDuration.toFixed(3),
+      "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+      "-pix_fmt", "yuv420p", "-profile:v", "high",
+      "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+      "-movflags", "+faststart", "-max_muxing_queue_size", "1024",
+      outputPath
+    ], 20 * 60 * 1000);
+    const stat = fs.statSync(outputPath);
+    if (!stat.size) throw new Error("Le fichier MP4 final est vide.");
+    return { outputPath, outputDir: dir, size: stat.size, duration: requestedDuration };
+  } catch (error) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
