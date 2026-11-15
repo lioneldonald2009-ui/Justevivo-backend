@@ -483,6 +483,38 @@ app.get("/", (req, res) => {
   });
 });
 
+// Manifeste de version public : récupéré depuis le frontend déployé sur Cloudflare.
+const APP_VERSION_MANIFEST_URL = process.env.APP_VERSION_MANIFEST_URL ||
+  "https://justevivo.pages.dev/app-version.json";
+app.get("/api/app-version", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  try {
+    const response = await fetch(APP_VERSION_MANIFEST_URL, {
+      headers: { "Accept": "application/json" },
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!response.ok) {
+      return res.status(503).json({ error: "Version manifest temporarily unavailable." });
+    }
+    const manifest = await response.json();
+    if (!manifest || typeof manifest.minimumVersion !== "string" ||
+        typeof manifest.latestVersion !== "string") {
+      return res.status(503).json({ error: "Invalid version manifest." });
+    }
+    res.json({
+      product: "JUSTEVIVO AI",
+      latestVersion: manifest.latestVersion,
+      minimumVersion: manifest.minimumVersion,
+      updateUrl: manifest.updateUrl || "https://justevivo.pages.dev/",
+      androidApkUrl: manifest.androidApkUrl || "",
+      message: manifest.message || "Une nouvelle version de JUSTEVIVO est nécessaire.",
+      releaseNotes: Array.isArray(manifest.releaseNotes) ? manifest.releaseNotes : []
+    });
+  } catch (error) {
+    res.status(503).json({ error: "Version service temporarily unavailable." });
+  }
+});
+
 // Configuration publique pour la connexion
 app.get("/api/config", (req, res) => {
   res.json(
