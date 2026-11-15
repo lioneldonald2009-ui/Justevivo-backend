@@ -373,6 +373,12 @@ async function applyDodoWebhook(event, webhookId) {
   if (["subscription.active","subscription.renewed","subscription.plan_changed"].includes(type)) {
     if (!plan || !PLANS[plan]) throw new Error("Formule Dodo inconnue : " + type);
     await sbPatch("profiles?user_id=eq." + userId, { plan, plan_until: dodoPeriodEnd(data) });
+    if (type === "subscription.active" && data.metadata?.campaign === "NOVDEC2026_60") {
+      try { await sbInsert("jv_promo_claims", { campaign: "NOVDEC2026_60", user_id: userId, plan }); }
+      catch (claimError) {
+        if (!/base de données 409|duplicate|unique/i.test(claimError.message)) throw claimError;
+      }
+    }
   } else if (["subscription.on_hold","subscription.paused","subscription.expired","subscription.failed"].includes(type)) {
     await sbPatch("profiles?user_id=eq." + userId, { plan: "free", plan_until: null });
   } else if (type === "subscription.cancelled") {
@@ -515,6 +521,26 @@ app.get("/api/app-version", async (req, res) => {
   }
 });
 
+// Campagne promotionnelle limitée aux 60 premiers abonnements payés.
+const DODO_PROMO_CODE = String(process.env.DODO_PROMO_CODE || "JUSTEVIVO30").trim().toUpperCase();
+const PROMO_START = new Date("2026-11-16T00:00:00.000Z");
+const PROMO_END = new Date("2027-01-01T00:00:00.000Z");
+async function getPromoStatus() {
+  const now = Date.now();
+  const active = now >= PROMO_START.getTime() && now < PROMO_END.getTime();
+  const rows = await sbGet("jv_promo_claims?campaign=eq.NOVDEC2026_60&select=user_id&limit=60");
+  const claimed = new Set(rows.map(row => row.user_id)).size;
+  return { active: active && claimed < 60, claimed, remaining: Math.max(0, 60 - claimed), total: 60, discountPercent: 30, endsAt: PROMO_END.toISOString(), appliesTo: "first_billing_cycle" };
+}
+app.get("/api/promotions/nov-dec-2026", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store, max-age=0");
+  try { res.json(await getPromoStatus()); }
+  catch (error) {
+    console.error("Erreur compteur promotionnel :", error.message);
+    res.status(503).json({ error: "Compteur promotionnel temporairement indisponible." });
+  }
+});
+
 // Configuration publique pour la connexion
 app.get("/api/config", (req, res) => {
   res.json(
@@ -557,12 +583,16 @@ app.post("/api/me/pay/create", limit("pay", 10, 10 * 60 * 1000), requireUser, as
   const plan = String(req.body && req.body.plan || "").toLowerCase();
   if (!["starter","pro","business"].includes(plan) || !DODO_PRODUCTS[plan]) return res.status(400).json({ error: "Formule inconnue." });
   try {
+    const campaign = "NOVDEC2026_60";
+    const promo = await getPromoStatus();
+    const promoActive = promo.active && promo.claimed < 60;
     const session = await dodo.checkoutSessions.create({
       product_cart: [{ product_id: DODO_PRODUCTS[plan], quantity: 1 }],
       customer: { email: req.user.email },
-      metadata: { user_id: req.user.id, plan, app: "justevivo" },
+      metadata: { user_id: req.user.id, plan, app: "justevivo", ...(promoActive ? { campaign } : {}) },
+      ...(promoActive ? { discount_codes: [DODO_PROMO_CODE] } : {}),
       return_url: process.env.DODO_PAYMENTS_RETURN_URL || (SITE_URL.replace(/\/$/, "") + "/?payment=dodo-return"),
-      feature_flags: { allow_currency_selection: true, allow_customer_editing_email: false }
+      feature_flags: { allow_discount_code: false, allow_currency_selection: true, allow_customer_editing_email: false }
     });
     if (!session || !session.checkout_url || !String(session.checkout_url).startsWith("https://")) throw new Error("URL checkout absente");
     res.json({ success: true, provider: "dodo", checkoutUrl: session.checkout_url });
