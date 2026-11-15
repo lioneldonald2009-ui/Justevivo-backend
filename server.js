@@ -32,6 +32,23 @@ const ALLOWED = [...new Set([
 const SITE_URL = process.env.SITE_URL || "https://justevivo.pages.dev/";
 
 app.set("trust proxy", 1);
+app.disable("x-powered-by");
+
+// En-têtes de sécurité pour toutes les réponses API.
+// Le backend ne sert pas l'interface web : aucune CSP applicative n'est imposée ici.
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  if (req.path.startsWith("/api/")) {
+    res.setHeader("Cache-Control", "no-store, max-age=0");
+    res.setHeader("Pragma", "no-cache");
+  }
+  next();
+});
 app.use(cors({
   origin(origin, cb) {
     cb(null, !origin || ALLOWED.includes(origin));
