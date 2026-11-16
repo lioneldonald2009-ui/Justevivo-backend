@@ -1393,6 +1393,57 @@ app.post("/api/creative/generate-script", limit("creative-script", 8, 60 * 60 * 
   }
 });
 
+app.post("/api/creative/repurpose", limit("creative-repurpose", 6, 60 * 60 * 1000), requireUser, async (req, res) => {
+  if (!process.env.GROQ_API_KEY) return res.status(503).json({ error: "Le moteur IA n’est pas configuré." });
+  const body = req.body || {};
+  const source = String(body.content || "").trim().slice(0, 7000);
+  const platforms = Array.isArray(body.platforms) ? [...new Set(body.platforms.map(x => String(x).trim()).filter(x => ["TikTok", "Instagram Reels", "YouTube Shorts", "Facebook", "LinkedIn", "YouTube"].includes(x)))].slice(0, 6) : [];
+  const objective = String(body.objective || "Engagement").slice(0, 50);
+  const tone = String(body.tone || "Naturel et dynamique").slice(0, 80);
+  if (source.length < 30) return res.status(400).json({ error: "Ajoutez un contenu source d’au moins 30 caractères." });
+  if (!platforms.length) return res.status(400).json({ error: "Sélectionnez au moins une plateforme." });
+  try {
+    const account = await getAccount(req.user.id, req.user.email);
+    if (!account.isAdmin && account.generatedToday >= account.limits.gen) {
+      return res.status(403).json({ error: "Votre quota quotidien de générations IA est atteint.", code: "QUOTA" });
+    }
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const prompt = [
+      "Décline le contenu source en publications adaptées à chaque plateforme demandée.",
+      "Retourne exclusivement un JSON valide avec une propriété variants, tableau d'objets contenant platform, format, hook, caption, cta et hashtags (tableau de 4 à 8 éléments).",
+      "Chaque variante doit respecter les usages de la plateforme, garder le message central et ne pas simplement copier-coller les autres variantes.",
+      "N'invente aucun chiffre, témoignage, preuve, résultat, promesse ou information absente de la source. Si une information manque, reste neutre.",
+      "Objectif : " + objective + ". Ton : " + tone + ". Plateformes : " + platforms.join(", ") + ".",
+      "CONTENU SOURCE :\n" + source
+    ].join("\n");
+    const raw = await askModel(groq, [
+      { role: "system", content: "Tu es stratège social media senior et copywriter multicanal. Réponds uniquement en JSON valide, sans Markdown et sans faits inventés." },
+      { role: "user", content: prompt }
+    ]);
+    let parsed;
+    try {
+      const cleaned = String(raw || "").trim().replace(/^\u0060\u0060\u0060(?:json)?\s*/i, "").replace(/\s*\u0060\u0060\u0060$/, "").trim();
+      const match = cleaned.match(/\{[\s\S]*\}/);
+      if (!match) throw new Error("JSON absent");
+      parsed = JSON.parse(match[0]);
+    } catch (_) { throw new Error("Le moteur IA n’a pas renvoyé des déclinaisons lisibles. Réessayez."); }
+    const variants = Array.isArray(parsed.variants) ? parsed.variants.filter(v => platforms.includes(String(v.platform))).slice(0, platforms.length).map(v => ({
+      platform: String(v.platform).slice(0, 40),
+      format: String(v.format || "").slice(0, 100),
+      hook: String(v.hook || "").slice(0, 400),
+      caption: String(v.caption || "").slice(0, 2200),
+      cta: String(v.cta || "").slice(0, 300),
+      hashtags: Array.isArray(v.hashtags) ? v.hashtags.slice(0, 8).map(x => String(x).slice(0, 80)) : []
+    })) : [];
+    if (!variants.length || variants.some(v => !v.hook || !v.caption)) throw new Error("Les déclinaisons générées sont incomplètes.");
+    if (!account.isAdmin) await sbInsert("usage", { user_id: req.user.id, job_id: "repurpose" + Date.now() + Math.random().toString(36).slice(2, 7), kind: "generate", seconds: 0 });
+    res.json({ success: true, variants });
+  } catch (error) {
+    console.error("Creative repurpose generation:", error.message);
+    res.status(422).json({ error: "La déclinaison du contenu a échoué. Réessayez avec un texte source plus précis." });
+  }
+});
+
 /* Recherche de musiques Jamendo. L'activation en production nécessite un accès API autorisé pour un service commercial. */
 /* Bibliothèque musicale gratuite Internet Archive : CC0, CC BY et CC BY-SA uniquement. */
 const isCommercialMusicLicense = (value) => {
