@@ -83,15 +83,19 @@ function isAdminUser(user) {
     String(user.email || "").trim().toLowerCase() === ADMIN_EMAIL);
 }
 
-// Formules JUSTEVIVO : vidéos traitées/mois, durée maximale (secondes), opérations IA/jour.
-// La génération de vidéos par IA est désactivée et n'est incluse dans aucune formule.
+// Formules JUSTEVIVO. Les crédits vidéo IA sont configurables côté serveur.
+// Valeur par défaut : 0 crédit, afin de ne jamais activer une génération payante sans décision tarifaire explicite.
+const configuredCredits = name => {
+  const value = Number(process.env[name] ?? 0);
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+};
 const PLANS = {
-  free: { name: "Gratuit", videos: 3, maxSeconds: 60, gen: 10, aiVideoCredits: 0 },
-  starter: { name: "Starter", videos: 25, maxSeconds: 300, gen: 50, aiVideoCredits: 0 },
-  pro: { name: "Pro", videos: 50, maxSeconds: 600, gen: 100, aiVideoCredits: 0 },
-  business: { name: "Business", videos: 110, maxSeconds: 1800, gen: 200, aiVideoCredits: 0 },
-  // Compatibilité : conserve les comptes historiques sans leur attribuer de crédits de génération vidéo IA.
-  all_in_one: { name: "Ancienne formule All-in-One", videos: 50, maxSeconds: 600, gen: 150, aiVideoCredits: 0 }
+  free: { name: "Gratuit", videos: 3, maxSeconds: 60, gen: 10, aiVideoCredits: configuredCredits("JV_AI_CREDITS_FREE") },
+  starter: { name: "Starter", videos: 25, maxSeconds: 300, gen: 50, aiVideoCredits: configuredCredits("JV_AI_CREDITS_STARTER") },
+  pro: { name: "Pro", videos: 50, maxSeconds: 600, gen: 100, aiVideoCredits: configuredCredits("JV_AI_CREDITS_PRO") },
+  business: { name: "Business", videos: 110, maxSeconds: 1800, gen: 200, aiVideoCredits: configuredCredits("JV_AI_CREDITS_BUSINESS") },
+  // Compatibilité des anciens comptes : aucun crédit implicite.
+  all_in_one: { name: "Ancienne formule All-in-One", videos: 50, maxSeconds: 600, gen: 150, aiVideoCredits: configuredCredits("JV_AI_CREDITS_ALL_IN_ONE") }
 };
 
 // ===== Paiements Dodo Payments =====
@@ -744,20 +748,17 @@ function ltxResolutionAndRatio(resolution, ratio) {
   return isSquare ? tier + "x" + tier : isPortrait ? tier + "x" + Math.round(tier * 16 / 9) : Math.round(tier * 16 / 9) + "x" + tier;
 }
 app.get("/api/ai-video/config", requireUser, async (req,res) => {
-  return res.status(410).json({ enabled:false, code:"AI_VIDEO_TEMPORARILY_DISABLED", message:"La génération vidéo IA est temporairement désactivée pendant la finalisation de JUSTEVIVO." });
   try {
     const account = await getAccount(req.user.id, req.user.email);
     const wallet = await getAiVideoWallet(req.user.id, account.plan, account.isAdmin);
     const provider = LTX_API_KEY ? "LTX" : "Runway Dev";
-    res.json({ enabled: Boolean(LTX_API_KEY || RUNWAY_API_KEY), provider, model: LTX_API_KEY ? LTX_MODEL : RUNWAY_MODEL, maxFinalDurationSeconds: 600, maxSceneDurationSeconds: LTX_API_KEY ? 20 : 30, resolutions: LTX_API_KEY ? ["720p","1080p"] : ["480p","720p","1080p"], defaultResolution: "720p", plan: account.plan, planName: account.limits.name, wallet, requiresAllInOne: account.plan !== "all_in_one" && !account.isAdmin, providerBilling: LTX_API_KEY ? "LTX facture chaque seconde générée directement sur le compte LTX." : "Facturation selon le fournisseur Runway." });
+    res.json({ enabled: Boolean((LTX_API_KEY || RUNWAY_API_KEY) && (account.isAdmin || wallet.balance > 0)), provider, model: LTX_API_KEY ? LTX_MODEL : RUNWAY_MODEL, maxFinalDurationSeconds: 600, maxSceneDurationSeconds: LTX_API_KEY ? 20 : 30, resolutions: LTX_API_KEY ? ["720p","1080p"] : ["480p","720p","1080p"], plan: account.plan, planName: account.limits.name, wallet, requiresAllInOne: false, providerBilling: LTX_API_KEY ? "LTX facture chaque seconde générée directement sur le compte LTX." : "Facturation selon le fournisseur Runway." });
   } catch (e) { res.status(503).json({ error: "Impossible de charger les crédits vidéo IA." }); }
 });
 app.post("/api/ai-video/generate", limit("ai-video-generate", 10, 60*60*1000), requireUser, async (req,res) => {
-  return res.status(410).json({ code:"AI_VIDEO_TEMPORARILY_DISABLED", error:"La génération vidéo IA est temporairement désactivée." });
   const useLtx = Boolean(LTX_API_KEY);
   if (!useLtx && !RUNWAY_API_KEY) return res.status(503).json({ error: "Aucun moteur vidéo IA n'est configuré sur le serveur.", code: "AI_VIDEO_NOT_CONFIGURED" });
   const account = await getAccount(req.user.id, req.user.email);
-  if (!account.isAdmin && account.plan !== "all_in_one") return res.status(403).json({ error: "Le générateur vidéo IA nécessite la formule ALL-IN-ONE.", code: "PLAN_REQUIRED" });
   const prompt = String(req.body?.prompt || "").trim().slice(0, 1800);
   const requestedDuration = Math.max(5, Math.min(30, Math.round(Number(req.body?.duration) || 5)));
   const duration = useLtx ? nearestLtxDuration(requestedDuration) : requestedDuration;
@@ -793,7 +794,6 @@ app.post("/api/ai-video/generate", limit("ai-video-generate", 10, 60*60*1000), r
   }
 });
 app.get("/api/ai-video/tasks/:taskId", requireUser, async (req,res) => {
-  return res.status(410).json({ code:"AI_VIDEO_TEMPORARILY_DISABLED", error:"Le générateur vidéo IA est temporairement désactivé." });
   const rawTaskId = String(req.params.taskId || "");
   const isLtx = rawTaskId.startsWith("ltx_");
   const taskId = rawTaskId.replace(/^ltx_/,"").replace(/[^a-zA-Z0-9_-]/g,"").slice(0,100);
@@ -830,12 +830,10 @@ app.get("/api/ai-video/tasks/:taskId", requireUser, async (req,res) => {
   } catch(e) { console.error("AI video task:",e.message); res.status(502).json({ error:"Impossible de récupérer l'état de la génération." }); }
 });
 app.post("/api/ai-video/assemble", limit("ai-video-assemble", 4, 60*60*1000), requireUser, async (req,res) => {
- return res.status(410).json({ code:"AI_VIDEO_TEMPORARILY_DISABLED", error:"L’assemblage des scènes IA est temporairement désactivé." });
  const ids=Array.isArray(req.body?.taskIds)?[...new Set(req.body.taskIds.map(x=>String(x).slice(0,110)).filter(x=>/^(ltx_)?[a-zA-Z0-9_-]+$/.test(x)))]:[];
  if(ids.length<2||ids.length>60)return res.status(400).json({error:"Sélectionnez entre 2 et 60 scènes."});
  try{
   const account=await getAccount(req.user.id,req.user.email);
-  if(!account.isAdmin&&account.plan!=="all_in_one")return res.status(403).json({error:"L’assemblage IA nécessite ALL-IN-ONE.",code:"PLAN_REQUIRED"});
   const urls=[];
   for(const fullId of ids){
    const isLtx=fullId.startsWith("ltx_"),id=fullId.replace(/^ltx_/,"");
