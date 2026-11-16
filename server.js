@@ -751,8 +751,8 @@ app.get("/api/ai-video/config", requireUser, async (req,res) => {
   try {
     const account = await getAccount(req.user.id, req.user.email);
     const wallet = await getAiVideoWallet(req.user.id, account.plan, account.isAdmin);
-    const provider = LTX_API_KEY ? "LTX" : "Runway Dev";
-    res.json({ enabled: Boolean((LTX_API_KEY || RUNWAY_API_KEY) && (account.isAdmin || wallet.balance > 0)), provider, model: LTX_API_KEY ? LTX_MODEL : RUNWAY_MODEL, maxFinalDurationSeconds: 600, maxSceneDurationSeconds: LTX_API_KEY ? 20 : 30, resolutions: LTX_API_KEY ? ["720p","1080p"] : ["480p","720p","1080p"], plan: account.plan, planName: account.limits.name, wallet, requiresAllInOne: false, providerBilling: LTX_API_KEY ? "LTX facture chaque seconde générée directement sur le compte LTX." : "Facturation selon le fournisseur Runway." });
+    const provider = LTX_API_KEY ? "LTX" : RUNWAY_API_KEY ? "Runway Dev" : "Non configuré";
+    res.json({ enabled: Boolean((LTX_API_KEY || RUNWAY_API_KEY) && (account.isAdmin || wallet.balance > 0)), provider, model: LTX_API_KEY ? LTX_MODEL : RUNWAY_API_KEY ? RUNWAY_MODEL : "", maxFinalDurationSeconds: 600, maxSceneDurationSeconds: LTX_API_KEY ? 20 : 30, resolutions: LTX_API_KEY ? ["720p","1080p"] : ["480p","720p","1080p"], plan: account.plan, planName: account.limits.name, wallet, requiresAllInOne: false, providerBilling: LTX_API_KEY ? "LTX facture chaque seconde générée directement sur le compte LTX." : "Facturation selon le fournisseur Runway." });
   } catch (e) { res.status(503).json({ error: "Impossible de charger les crédits vidéo IA." }); }
 });
 app.post("/api/ai-video/generate", limit("ai-video-generate", 10, 60*60*1000), requireUser, async (req,res) => {
