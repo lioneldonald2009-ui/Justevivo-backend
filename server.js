@@ -280,36 +280,52 @@ function validSasPaySignature(rawBody, signature, timestamp) {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
-async function activateSasPaySession(userId, sessionId) {
+async function activateSasPaySession(userId, sessionId, expectedTransactionId = "") {
   const session = await saspayRequest("/checkout-sessions/" + encodeURIComponent(sessionId) + "/");
   const metadata = session && session.metadata && typeof session.metadata === "object" ? session.metadata : {};
   const plan = String(metadata.plan || "").toLowerCase();
   const owner = String(metadata.user_id || "");
   const expectedAmount = Number(metadata.amount_xof);
   const amount = Number(session.amount);
-  if (owner !== userId || !["starter", "pro", "business"].includes(plan)) return { activated: false };
+  const transactionId = String(session.transaction && (session.transaction.id || session.transaction_id) || session.transaction_id || "");
+  if ((userId && owner !== userId) || !owner || !["starter", "pro", "business"].includes(plan)) return { activated: false };
+  if (expectedTransactionId && transactionId !== expectedTransactionId) return { activated: false };
   if (session.currency !== "XOF" || session.status !== "PAID" || !Number.isFinite(amount) ||
-      !Number.isFinite(expectedAmount) || amount !== expectedAmount || amount !== PRICES_XOF[plan] && amount !== PROMO_PRICES_XOF[plan]) {
-    return { activated: false };
-  }
-  const paymentId = String(session.transaction && (session.transaction.id || session.transaction_id) || session.id);
+      !Number.isFinite(expectedAmount) || amount !== expectedAmount ||
+      (amount !== PRICES_XOF[plan] && amount !== PROMO_PRICES_XOF[plan])) return { activated: false };
+  const paymentId = transactionId || String(session.id);
   const jobId = "saspay_paid_" + paymentId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80);
   const existing = await sbGet("usage?job_id=eq." + encodeURIComponent(jobId) + "&kind=eq.saspay_payment&select=id&limit=1");
   if (existing.length) return { activated: true, alreadyProcessed: true, plan };
-  const account = await getAccount(userId);
+  const account = await getAccount(owner);
   const now = Date.now();
   const base = account.plan === plan && account.planUntil && new Date(account.planUntil).getTime() > now
     ? new Date(account.planUntil).getTime() : now;
   const until = new Date(base + 30 * 86400000).toISOString();
-  await sbPatch("profiles?user_id=eq." + userId, { plan, plan_until: until });
-  await sbInsert("usage", { user_id: userId, job_id: jobId, kind: "saspay_payment", seconds: 0 });
+  await sbPatch("profiles?user_id=eq." + encodeURIComponent(owner), { plan, plan_until: until });
+  await sbInsert("usage", { user_id: owner, job_id: jobId, kind: "saspay_payment", seconds: 0 });
   if (metadata.campaign === "NOVDEC2026_60") {
-    try { await sbInsert("jv_promo_claims", { campaign: "NOVDEC2026_60", user_id: userId, plan }); }
+    try { await sbInsert("jv_promo_claims", { campaign: "NOVDEC2026_60", user_id: owner, plan }); }
     catch (error) {
       if (!/base de données 409|duplicate|unique/i.test(error.message)) throw error;
     }
   }
   return { activated: true, plan, planUntil: until };
+}
+
+async function findSasPaySessionForTransaction(transactionId) {
+  if (!transactionId) return null;
+  for (let page = 1; page <= 10; page++) {
+    const payload = await saspayRequest("/checkout-sessions/?status=PAID&page=" + page + "&page_size=100");
+    const sessions = Array.isArray(payload.results) ? payload.results : Array.isArray(payload) ? payload : [];
+    const match = sessions.find(item => {
+      const tx = item && item.transaction;
+      return String((tx && (tx.id || tx.transaction_id)) || item.transaction_id || "") === transactionId;
+    });
+    if (match) return match;
+    if (!payload.next || sessions.length === 0) break;
+  }
+  return null;
 }
 const hits = new Map();
 
@@ -567,10 +583,31 @@ app.post("/api/payments/saspay/webhook", async (req, res) => {
   let event = {};
   try { event = JSON.parse(req.rawBody.toString("utf8")); }
   catch (error) { return res.status(400).json({ error: "Payload invalide." }); }
-  if (String(event.event || req.headers["x-webhook-event"] || "") === "transaction.success") {
-    // Le schéma public transaction.success ne fournit pas l'ID de session checkout ni metadata.
-    // On journalise l'événement validé ; l'activation reste basée sur /api/me/pay/confirm.
-    console.info("Webhook SasPay transaction.success reçu :", String(event.data && event.data.id || ""));
+  const eventName = String(event.event || req.headers["x-webhook-event"] || "");
+  if (eventName === "transaction.success") {
+    const data = event.data || {};
+    const transactionId = String(data.id || "");
+    if (String(data.status || "").toUpperCase() !== "SUCCESS" ||
+        String(data.type || "").toUpperCase() !== "PAIEMENT" ||
+        String(data.currency || "").toUpperCase() !== "XOF" || !transactionId) {
+      return res.status(200).json({ received: true, ignored: true });
+    }
+    try {
+      const checkout = await findSasPaySessionForTransaction(transactionId);
+      if (!checkout || !checkout.id) {
+        console.error("Webhook SasPay : session de checkout introuvable pour transaction", transactionId);
+        return res.status(503).json({ error: "Session de paiement non retrouvée, nouvelle tentative requise." });
+      }
+      const result = await activateSasPaySession("", String(checkout.id), transactionId);
+      if (!result.activated) {
+        console.error("Webhook SasPay : transaction confirmée mais données checkout incohérentes", transactionId);
+        return res.status(422).json({ error: "Données de paiement incohérentes." });
+      }
+      console.info("Abonnement JUSTEVIVO activé via webhook SasPay :", result.plan, transactionId);
+    } catch (error) {
+      console.error("Traitement webhook SasPay échoué :", error.message);
+      return res.status(503).json({ error: "Traitement temporairement indisponible." });
+    }
   }
   return res.status(200).json({ received: true });
 });
