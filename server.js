@@ -538,48 +538,8 @@ app.get("/api/app-version", async (req, res) => {
 });
 
 // Campagne promotionnelle limitée aux 60 premiers abonnements payés.
-const DODO_PROMO_CODE = String(process.env.DODO_PROMO_CODE || "JUSTEVIVO30").trim().toUpperCase();
 const PROMO_START = new Date("2026-11-16T00:00:00.000Z");
 const PROMO_END = new Date("2027-01-01T00:00:00.000Z");
-let promoDiscountSetup = null;
-async function ensurePromoDiscount() {
-  if (!DODO_ENABLED || !dodo) return false;
-  if (!promoDiscountSetup) {
-    promoDiscountSetup = (async () => {
-      const params = {
-        type: "percentage",
-        amount: 3000,
-        code: DODO_PROMO_CODE,
-        usage_limit: 60,
-        subscription_cycles: 1,
-        starts_at: PROMO_START.toISOString(),
-        expires_at: PROMO_END.toISOString(),
-        restricted_to: Object.values(DODO_PRODUCTS)
-      };
-      try {
-        const existing = await dodo.discounts.retrieveByCode(DODO_PROMO_CODE);
-        if (Number(existing.amount) !== 3000 || existing.type !== "percentage" ||
-            Number(existing.usage_limit) !== 60 || Number(existing.subscription_cycles) !== 1) {
-          throw new Error("Le code promo Dodo existe déjà avec des paramètres différents.");
-        }
-        return true;
-      } catch (lookupError) {
-        if (/paramètres différents/.test(lookupError.message)) throw lookupError;
-        try {
-          await dodo.discounts.create(params);
-          return true;
-        } catch (createError) {
-          // Une création concurrente peut avoir créé le code entre la recherche et la création.
-          const existing = await dodo.discounts.retrieveByCode(DODO_PROMO_CODE);
-          if (Number(existing.amount) === 3000 && existing.type === "percentage" &&
-              Number(existing.usage_limit) === 60 && Number(existing.subscription_cycles) === 1) return true;
-          throw createError;
-        }
-      }
-    })();
-  }
-  return promoDiscountSetup;
-}
 async function getPromoStatus() {
   const now = Date.now();
   const active = now >= PROMO_START.getTime() && now < PROMO_END.getTime();
