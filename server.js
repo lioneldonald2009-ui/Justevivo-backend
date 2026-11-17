@@ -6,7 +6,7 @@ import path from "path";
 import Groq from "groq-sdk";
 import { removeSilenceFromVideo, removeTimeRangesFromVideo, extractCompressedAudio, enhanceVideoAudio, renderVideoClip, composeVideoWithAssets, finalizeVideoExport } from "./video-processing.js";
 import dotenv from "dotenv";
-import DodoPayments from "dodopayments";
+import crypto from "crypto";
 import { assembleGeneratedVideos } from "./ai-video-assembly.js";
 import { registerSocialOAuth } from "./social-oauth.js";
 
@@ -94,18 +94,18 @@ const PLANS = {
   all_in_one: { name: "Ancienne formule All-in-One", videos: 50, maxSeconds: 600, gen: 150, aiVideoCredits: 0 }
 };
 
-// ===== Paiements Dodo Payments =====
-const DODO_API_KEY = String(process.env.DODO_PAYMENTS_API_KEY || "").trim();
-const DODO_WEBHOOK_KEY = String(process.env.DODO_PAYMENTS_WEBHOOK_KEY || "").trim();
-const DODO_ENV = String(process.env.DODO_PAYMENTS_ENVIRONMENT || "test_mode").trim() === "live_mode" ? "live_mode" : "test_mode";
-const DODO_PRODUCTS = {
-  starter: String(process.env.DODO_PRODUCT_STARTER || "").trim(),
-  pro: String(process.env.DODO_PRODUCT_PRO || "").trim(),
-  business: String(process.env.DODO_PRODUCT_BUSINESS || "").trim()
-};
-const DODO_ENABLED = ACCOUNTS_ON && Boolean(DODO_API_KEY && DODO_WEBHOOK_KEY && DODO_PRODUCTS.starter && DODO_PRODUCTS.pro && DODO_PRODUCTS.business);
-const PAY_ON = DODO_ENABLED;
-const dodo = DODO_API_KEY ? new DodoPayments({ bearerToken: DODO_API_KEY, environment: DODO_ENV, webhookKey: DODO_WEBHOOK_KEY || undefined }) : null;
+// ===== Paiements SasPay =====
+const SASPAY_API_KEY = String(process.env.SASPAY_API_KEY || "").trim();
+const SASPAY_WEBHOOK_SECRET = String(process.env.SASPAY_WEBHOOK_SECRET || "").trim();
+const SASPAY_ENV = String(process.env.SASPAY_ENVIRONMENT || "sandbox").trim().toLowerCase() === "live" ? "live" : "sandbox";
+// Ne jamais envoyer une clé de test vers l'API de production, ni une clé live vers le sandbox.
+const SASPAY_API_BASE = SASPAY_ENV === "live"
+  ? "https://api.saspay.me/api/v1"
+  : "https://sandbox-api.saspay.me/api/v1";
+const SASPAY_ENABLED = ACCOUNTS_ON && Boolean(SASPAY_API_KEY && SASPAY_WEBHOOK_SECRET);
+const PAY_ON = SASPAY_ENABLED;
+const PRICES_XOF = { starter: 9800, pro: 13100, business: 19700 };
+const PROMO_PRICES_XOF = { starter: 6900, pro: 9200, business: 13800 };
 
 function fmtLimit(sec) {
   return sec >= 60 ? Math.round(sec / 60) + " min" : sec + " s";
@@ -339,53 +339,69 @@ async function settlePayments(userId) {
 }
 
 // ===== Limite de demandes par personne =====
-// Helpers Dodo : accès accordé uniquement après webhook signé.
-function dodoPlanFromData(data) {
-  const meta = data && data.metadata && typeof data.metadata === "object" ? data.metadata : {};
-  const hinted = String(meta.plan || "").toLowerCase();
-  if (["starter","pro","business"].includes(hinted)) return hinted;
-  const productId = String(data && (data.product_id || data.product && data.product.product_id) || "");
-  return Object.keys(DODO_PRODUCTS).find(k => DODO_PRODUCTS[k] && DODO_PRODUCTS[k] === productId) || "";
-}
-function dodoUserFromData(data) {
-  const meta = data && data.metadata && typeof data.metadata === "object" ? data.metadata : {};
-  return String(meta.user_id || "");
-}
-function dodoPeriodEnd(data) {
-  for (const value of [data && data.next_billing_date, data && data.current_period_end, data && data.expires_at, data && data.period_end]) {
-    const date = value ? new Date(value) : null;
-    if (date && Number.isFinite(date.getTime())) return date.toISOString();
+// SasPay : activation uniquement après relecture serveur d'une session PAID.
+async function saspayRequest(pathname, options = {}) {
+  const response = await fetch(SASPAY_API_BASE + pathname, {
+    method: options.method || "GET",
+    headers: {
+      Authorization: "Bearer " + SASPAY_API_KEY,
+      ...(options.body ? { "Content-Type": "application/json" } : {})
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+    signal: AbortSignal.timeout(15000)
+  });
+  let data = {};
+  try { data = await response.json(); } catch (e) { /* réponse vide */ }
+  if (!response.ok) {
+    const error = new Error("SasPay " + response.status + " " + String(data.message || data.detail || ""));
+    error.status = response.status;
+    throw error;
   }
-  return new Date(Date.now() + 30 * 86400000).toISOString();
+  return data && data.data && typeof data.data === "object" ? data.data : data;
 }
-async function applyDodoWebhook(event, webhookId) {
-  const data = event && event.data || {};
-  const type = String(event && event.type || "");
-  const userId = dodoUserFromData(data);
-  const plan = dodoPlanFromData(data);
-  if (!userId) { console.warn("Webhook Dodo sans metadata.user_id", type); return; }
-  const eventKey = String(webhookId || event.id || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 100);
-  if (eventKey) {
-    const exists = await sbGet("usage?job_id=eq.dodo_evt_" + encodeURIComponent(eventKey) + "&kind=eq.dodo_event&select=id&limit=1");
-    if (exists.length) return;
+
+function validSasPaySignature(rawBody, signature, timestamp) {
+  if (!SASPAY_WEBHOOK_SECRET || !rawBody || !signature || !timestamp) return false;
+  const seconds = Number(timestamp);
+  if (!Number.isFinite(seconds) || Math.abs(Math.floor(Date.now() / 1000) - seconds) > 300) return false;
+  const expected = crypto.createHmac("sha256", SASPAY_WEBHOOK_SECRET)
+    .update(String(timestamp) + "." + rawBody.toString("utf8"))
+    .digest("hex");
+  const a = Buffer.from(String(signature).toLowerCase(), "utf8");
+  const b = Buffer.from(expected, "utf8");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+async function activateSasPaySession(userId, sessionId) {
+  const session = await saspayRequest("/checkout-sessions/" + encodeURIComponent(sessionId) + "/");
+  const metadata = session && session.metadata && typeof session.metadata === "object" ? session.metadata : {};
+  const plan = String(metadata.plan || "").toLowerCase();
+  const owner = String(metadata.user_id || "");
+  const expectedAmount = Number(metadata.amount_xof);
+  const amount = Number(session.amount);
+  if (owner !== userId || !["starter", "pro", "business"].includes(plan)) return { activated: false };
+  if (session.currency !== "XOF" || session.status !== "PAID" || !Number.isFinite(amount) ||
+      !Number.isFinite(expectedAmount) || amount !== expectedAmount || amount !== PRICES_XOF[plan] && amount !== PROMO_PRICES_XOF[plan]) {
+    return { activated: false };
   }
-  await getAccount(userId);
-  if (["subscription.active","subscription.renewed","subscription.plan_changed"].includes(type)) {
-    if (!plan || !PLANS[plan]) throw new Error("Formule Dodo inconnue : " + type);
-    await sbPatch("profiles?user_id=eq." + userId, { plan, plan_until: dodoPeriodEnd(data) });
-    if (type === "subscription.active" && data.metadata?.campaign === "NOVDEC2026_60") {
-      try { await sbInsert("jv_promo_claims", { campaign: "NOVDEC2026_60", user_id: userId, plan }); }
-      catch (claimError) {
-        if (!/base de données 409|duplicate|unique/i.test(claimError.message)) throw claimError;
-      }
+  const paymentId = String(session.transaction && (session.transaction.id || session.transaction_id) || session.id);
+  const jobId = "saspay_paid_" + paymentId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80);
+  const existing = await sbGet("usage?job_id=eq." + encodeURIComponent(jobId) + "&kind=eq.saspay_payment&select=id&limit=1");
+  if (existing.length) return { activated: true, alreadyProcessed: true, plan };
+  const account = await getAccount(userId);
+  const now = Date.now();
+  const base = account.plan === plan && account.planUntil && new Date(account.planUntil).getTime() > now
+    ? new Date(account.planUntil).getTime() : now;
+  const until = new Date(base + 30 * 86400000).toISOString();
+  await sbPatch("profiles?user_id=eq." + userId, { plan, plan_until: until });
+  await sbInsert("usage", { user_id: userId, job_id: jobId, kind: "saspay_payment", seconds: 0 });
+  if (metadata.campaign === "NOVDEC2026_60") {
+    try { await sbInsert("jv_promo_claims", { campaign: "NOVDEC2026_60", user_id: userId, plan }); }
+    catch (error) {
+      if (!/base de données 409|duplicate|unique/i.test(error.message)) throw error;
     }
-  } else if (["subscription.on_hold","subscription.paused","subscription.expired","subscription.failed"].includes(type)) {
-    await sbPatch("profiles?user_id=eq." + userId, { plan: "free", plan_until: null });
-  } else if (type === "subscription.cancelled") {
-    const end = [data.current_period_end, data.next_billing_date, data.cancel_at].map(v => v ? new Date(v) : null).find(d => d && Number.isFinite(d.getTime()) && d.getTime() > Date.now());
-    await sbPatch("profiles?user_id=eq." + userId, end ? { plan_until: end.toISOString() } : { plan: "free", plan_until: null });
   }
-  if (eventKey) await sbInsert("usage", { user_id: userId, job_id: "dodo_evt_" + eventKey, kind: "dodo_event", seconds: 0 });
+  return { activated: true, plan, planUntil: until };
 }
 const hits = new Map();
 
@@ -584,7 +600,7 @@ app.get("/api/promotions/nov-dec-2026", async (req, res) => {
 app.get("/api/config", (req, res) => {
   res.json(
     ACCOUNTS_ON
-      ? { enabled: true, url: SB_URL, anonKey: SB_ANON, payments: DODO_ENABLED, paymentProvider: "dodo", paymentEnvironment: DODO_ENV, captchaSiteKey: CAPTCHA_SITE_KEY }
+      ? { enabled: true, url: SB_URL, anonKey: SB_ANON, payments: SASPAY_ENABLED, paymentProvider: "saspay", paymentEnvironment: SASPAY_ENV, captchaSiteKey: CAPTCHA_SITE_KEY }
       : { enabled: false }
   );
 });
@@ -615,48 +631,80 @@ app.get("/api/me", requireUser, async (req, res) => {
   }
 });
 
-// Checkout récurrent Dodo : produits mensuels configurés dans l'espace Dodo.
+// Checkout SasPay : paiement mensuel manuel (30 jours), montant fixé côté serveur en XOF.
 app.post("/api/me/pay/create", limit("pay", 10, 10 * 60 * 1000), requireUser, async (req, res) => {
-  if (!DODO_ENABLED || !dodo) return res.status(503).json({ error: "Le paiement Dodo n'est pas encore configuré.", code: "PAYMENTS_NOT_CONFIGURED" });
+  if (!SASPAY_ENABLED) return res.status(503).json({ error: "Le paiement SasPay n'est pas encore configuré.", code: "PAYMENTS_NOT_CONFIGURED" });
   if (isAdminUser(req.user)) return res.status(403).json({ error: "Le compte administrateur bénéficie déjà de tous les accès.", code: "ADMIN" });
   const plan = String(req.body && req.body.plan || "").toLowerCase();
-  if (!["starter","pro","business"].includes(plan) || !DODO_PRODUCTS[plan]) return res.status(400).json({ error: "Formule inconnue." });
+  if (!["starter", "pro", "business"].includes(plan)) return res.status(400).json({ error: "Formule inconnue." });
   try {
-    const campaign = "NOVDEC2026_60";
     const promo = await getPromoStatus();
-    const promoActive = promo.active && promo.claimed < 60 && await ensurePromoDiscount();
-    const session = await dodo.checkoutSessions.create({
-      product_cart: [{ product_id: DODO_PRODUCTS[plan], quantity: 1 }],
-      customer: { email: req.user.email },
-      metadata: { user_id: req.user.id, plan, app: "justevivo", ...(promoActive ? { campaign } : {}) },
-      ...(promoActive ? { discount_codes: [DODO_PROMO_CODE] } : {}),
-      return_url: process.env.DODO_PAYMENTS_RETURN_URL || (SITE_URL.replace(/\/$/, "") + "/?payment=dodo-return"),
-      feature_flags: { allow_discount_code: false, allow_currency_selection: true, allow_customer_editing_email: false }
+    // Promotion accordée uniquement tant que le compteur est inférieur à 60.
+    // Le montant final est enregistré dans les métadonnées vérifiées au retour.
+    const promoActive = Boolean(promo.active && promo.claimed < 60);
+    const amount = promoActive ? PROMO_PRICES_XOF[plan] : PRICES_XOF[plan];
+    const session = await saspayRequest("/checkout-sessions/", {
+      method: "POST",
+      body: {
+        amount: amount.toFixed(2),
+        currency: "XOF",
+        description: "JUSTEVIVO - Formule " + plan.toUpperCase() + " (30 jours)",
+        country: "BJ",
+        customer_email: req.user.email,
+        customer_name: String(req.user.email || "Client JUSTEVIVO").split("@")[0],
+        return_url: SITE_URL.replace(/\/$/, "") + "/?payment=saspay-return",
+        metadata: {
+          app: "justevivo",
+          user_id: req.user.id,
+          plan,
+          amount_xof: String(amount),
+          campaign: promoActive ? "NOVDEC2026_60" : ""
+        }
+      }
     });
-    if (!session || !session.checkout_url || !String(session.checkout_url).startsWith("https://")) throw new Error("URL checkout absente");
-    res.json({ success: true, provider: "dodo", checkoutUrl: session.checkout_url });
-  } catch (e) {
-    console.error("Erreur checkout Dodo :", e.message);
-    res.status(502).json({ error: "Impossible de créer la session de paiement. Vérifiez la configuration Dodo et réessayez." });
+    const checkoutUrl = String(session.checkout_url || "");
+    const sessionId = String(session.id || "");
+    if (!sessionId || !checkoutUrl.startsWith("https://")) throw new Error("Réponse SasPay incomplète");
+    res.json({ success: true, provider: "saspay", checkoutUrl, sessionId });
+  } catch (error) {
+    console.error("Erreur checkout SasPay :", error.message);
+    res.status(502).json({ error: "Impossible de créer la session SasPay. Réessayez dans un instant." });
   }
 });
 
-app.post("/api/payments/dodo/webhook", async (req, res) => {
-  if (!dodo || !DODO_WEBHOOK_KEY || !req.rawBody) return res.status(503).json({ error: "Webhook Dodo non configuré." });
+// Vérification appelée après le retour du checkout. Le serveur relit lui-même la session SasPay.
+app.post("/api/me/pay/confirm", requireUser, async (req, res) => {
+  if (!SASPAY_ENABLED) return res.status(503).json({ error: "Paiement non configuré." });
+  const sessionId = String(req.body && req.body.sessionId || "").trim();
+  if (!/^[0-9a-f-]{36}$/i.test(sessionId)) return res.status(400).json({ error: "Référence de paiement invalide." });
   try {
-    const event = dodo.webhooks.unwrap(req.rawBody.toString("utf8"), {
-      headers: {
-        "webhook-id": String(req.headers["webhook-id"] || ""),
-        "webhook-signature": String(req.headers["webhook-signature"] || ""),
-        "webhook-timestamp": String(req.headers["webhook-timestamp"] || "")
-      }
-    });
-    await applyDodoWebhook(event, String(req.headers["webhook-id"] || event.id || ""));
-    return res.json({ received: true });
-  } catch (e) {
-    console.error("Webhook Dodo rejeté/échoué :", e.message);
-    return res.status(400).json({ error: "Webhook invalide ou traitement impossible." });
+    const result = await activateSasPaySession(req.user.id, sessionId);
+    const account = await getAccount(req.user.id, req.user.email);
+    return res.json({ success: Boolean(result.activated), activated: Boolean(result.activated), plan: result.plan || account.plan, planUntil: account.planUntil });
+  } catch (error) {
+    console.error("Vérification SasPay impossible :", error.message);
+    return res.status(502).json({ error: "La confirmation du paiement est temporairement indisponible." });
   }
+});
+
+// Webhook SasPay : vérifie HMAC + horodatage. L'activation est faite par relecture de session
+// authentifiée via l'API SasPay, jamais à partir du seul payload webhook.
+app.post("/api/payments/saspay/webhook", async (req, res) => {
+  if (!SASPAY_WEBHOOK_SECRET || !req.rawBody) return res.status(503).json({ error: "Webhook SasPay non configuré." });
+  const signature = String(req.headers["x-webhook-signature"] || "");
+  const timestamp = String(req.headers["x-webhook-timestamp"] || "");
+  if (!validSasPaySignature(req.rawBody, signature, timestamp)) {
+    return res.status(401).json({ error: "Signature webhook invalide." });
+  }
+  let event = {};
+  try { event = JSON.parse(req.rawBody.toString("utf8")); }
+  catch (error) { return res.status(400).json({ error: "Payload invalide." }); }
+  if (String(event.event || req.headers["x-webhook-event"] || "") === "transaction.success") {
+    // Le schéma public transaction.success ne fournit pas l'ID de session checkout ni metadata.
+    // On journalise l'événement validé ; l'activation reste basée sur /api/me/pay/confirm.
+    console.info("Webhook SasPay transaction.success reçu :", String(event.data && event.data.id || ""));
+  }
+  return res.status(200).json({ received: true });
 });
 
 // Correction linguistique légère des segments ASR : conserve les timings et protège les noms propres.
@@ -1855,6 +1903,6 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(
     `JUSTEVIVO fonctionne sur le port ${PORT} (comptes : ${ACCOUNTS_ON ? "activés" : "désactivés"}, ` +
-    `paiement : ${PAY_ON ? "activé (" + (FEDA_BASE.includes("sandbox") ? "test" : "réel") + ")" : "désactivé"})`
+    `paiement SasPay : ${PAY_ON ? "configuré (" + SASPAY_ENV + ")" : "désactivé"})`
   );
 });
