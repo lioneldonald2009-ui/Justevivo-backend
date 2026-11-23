@@ -466,7 +466,7 @@ const PROMO_CAMPAIGN = "NOVDEC2026_60"; // Identifiant conservé pour préserver
 async function getPromoStatus() {
   const rows = await sbGet("jv_promo_claims?campaign=eq." + PROMO_CAMPAIGN + "&select=user_id&limit=60");
   const claimed = new Set(rows.map(row => row.user_id)).size;
-  return { active: claimed < 60, claimed, remaining: Math.max(0, 60 - claimed), total: 60, discountPercent: 30, endsAt: null, appliesTo: "every_billing_cycle" };
+  return { active: claimed < 60, claimed, remaining: Math.max(0, 60 - claimed), total: 60, discountPercent: 30, endsAt: null, appliesTo: "first_payment_only" };
 }
 app.get("/api/promotions/nov-dec-2026", async (req, res) => {
   res.setHeader("Cache-Control", "no-store, max-age=0");
@@ -520,10 +520,10 @@ app.post("/api/me/pay/create", limit("pay", 10, 10 * 60 * 1000), requireUser, as
   if (!["starter", "pro", "business"].includes(plan)) return res.status(400).json({ error: "Formule inconnue." });
   try {
     const promo = await getPromoStatus();
-    // Les 60 premiers comptes conservent la remise sur chaque renouvellement.
-    // Les nouveaux comptes bénéficient de la remise tant qu'il reste des places.
+    // La remise est appliquée une seule fois, au premier paiement éligible.
+    // Un compte ayant déjà utilisé la promotion ne peut pas la réutiliser.
     const existingClaim = await sbGet("jv_promo_claims?campaign=eq." + PROMO_CAMPAIGN + "&user_id=eq." + encodeURIComponent(req.user.id) + "&select=user_id&limit=1");
-    const promoActive = Boolean(existingClaim.length || promo.active);
+    const promoActive = Boolean(!existingClaim.length && promo.active);
     const amount = promoActive ? PROMO_PRICES_XOF[plan] : PRICES_XOF[plan];
     const session = await saspayRequest("/checkout-sessions/", {
       method: "POST",
