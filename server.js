@@ -51,7 +51,20 @@ app.use((req, res, next) => {
 });
 app.use(cors({
   origin(origin, cb) {
-    cb(null, !origin || ALLOWED.includes(origin));
+    // Autorise aussi les URL HTTPS de prévisualisation Cloudflare Pages
+    // du projet JUSTEVIVO, sans ouvrir le backend à tous les domaines pages.dev.
+    let isJustevivoPreview = false;
+    if (origin) {
+      try {
+        const parsed = new URL(origin);
+        isJustevivoPreview =
+          parsed.protocol === "https:" &&
+          parsed.hostname.endsWith(".justevivo.pages.dev");
+      } catch (e) {
+        isJustevivoPreview = false;
+      }
+    }
+    cb(null, !origin || ALLOWED.includes(origin) || isJustevivoPreview);
   }
 }));
 // Les lots de sous-titres peuvent dépasser 20 Ko (jusqu’à 300 segments).
