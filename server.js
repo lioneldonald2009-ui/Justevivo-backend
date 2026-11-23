@@ -461,15 +461,12 @@ app.get("/api/app-version", async (req, res) => {
   }
 });
 
-// Campagne promotionnelle limitée aux 60 premiers abonnements payés.
-const PROMO_START = new Date("2026-11-16T00:00:00.000Z");
-const PROMO_END = new Date("2027-01-01T00:00:00.000Z");
+// Promotion permanente jusqu'à attribution des 60 places.
+const PROMO_CAMPAIGN = "NOVDEC2026_60"; // Identifiant conservé pour préserver les réservations déjà enregistrées.
 async function getPromoStatus() {
-  const now = Date.now();
-  const active = now >= PROMO_START.getTime() && now < PROMO_END.getTime();
-  const rows = await sbGet("jv_promo_claims?campaign=eq.NOVDEC2026_60&select=user_id&limit=60");
+  const rows = await sbGet("jv_promo_claims?campaign=eq." + PROMO_CAMPAIGN + "&select=user_id&limit=60");
   const claimed = new Set(rows.map(row => row.user_id)).size;
-  return { active: active && claimed < 60, claimed, remaining: Math.max(0, 60 - claimed), total: 60, discountPercent: 30, endsAt: PROMO_END.toISOString(), appliesTo: "first_billing_cycle" };
+  return { active: claimed < 60, claimed, remaining: Math.max(0, 60 - claimed), total: 60, discountPercent: 30, endsAt: null, appliesTo: "every_billing_cycle" };
 }
 app.get("/api/promotions/nov-dec-2026", async (req, res) => {
   res.setHeader("Cache-Control", "no-store, max-age=0");
@@ -523,9 +520,10 @@ app.post("/api/me/pay/create", limit("pay", 10, 10 * 60 * 1000), requireUser, as
   if (!["starter", "pro", "business"].includes(plan)) return res.status(400).json({ error: "Formule inconnue." });
   try {
     const promo = await getPromoStatus();
-    // Promotion accordée uniquement tant que le compteur est inférieur à 60.
-    // Le montant final est enregistré dans les métadonnées vérifiées au retour.
-    const promoActive = Boolean(promo.active && promo.claimed < 60);
+    // Les 60 premiers comptes conservent la remise sur chaque renouvellement.
+    // Les nouveaux comptes bénéficient de la remise tant qu'il reste des places.
+    const existingClaim = await sbGet("jv_promo_claims?campaign=eq." + PROMO_CAMPAIGN + "&user_id=eq." + encodeURIComponent(req.user.id) + "&select=user_id&limit=1");
+    const promoActive = Boolean(existingClaim.length || promo.active);
     const amount = promoActive ? PROMO_PRICES_XOF[plan] : PRICES_XOF[plan];
     const session = await saspayRequest("/checkout-sessions/", {
       method: "POST",
@@ -542,7 +540,7 @@ app.post("/api/me/pay/create", limit("pay", 10, 10 * 60 * 1000), requireUser, as
           user_id: req.user.id,
           plan,
           amount_xof: String(amount),
-          campaign: promoActive ? "NOVDEC2026_60" : ""
+          campaign: promoActive ? PROMO_CAMPAIGN : ""
         }
       }
     });
