@@ -14,9 +14,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Install dependencies
+        run: npm ci
+      - name: Run subtitle utility tests
+        run: npm test
       - name: Check backend JavaScript syntax
         run: |
           node --check server.js
+          node --check subtitle-tools.js
           node --check video-processing.js
           node --check ai-video-assembly.js
           node --check social-oauth.js
