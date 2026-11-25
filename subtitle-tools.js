@@ -41,7 +41,7 @@ export function parseSubtitleText(input, format = "auto") {
     const lines = block.split("\n").map(line => line.trimEnd());
     const timeIndex = lines.findIndex(line => line.includes("-->"));
     if (timeIndex < 0) continue;
-    const match = lines[timeIndex].match(/^\s*(\d{1,2}:)?\d{2}:\d{2}[.,]\d{1,3}\s+-->\s+(\d{1,2}:)?\d{2}:\d{2}[.,]\d{1,3}(?:\s+.*)?$/);
+    const match = lines[timeIndex].match(/^\s*(?:(?:\d{1,2}:)?\d{2}:\d{2}|\d{2}:\d{2})[.,]\d{1,3}\s+-->\s+(?:(?:\d{1,2}:)?\d{2}:\d{2}|\d{2}:\d{2})[.,]\d{1,3}(?:\s+.*)?$/);
     if (!match) continue;
     const times = lines[timeIndex].split("-->");
     const start = timestampToSeconds(times[0].trim());
