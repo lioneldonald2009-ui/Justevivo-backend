@@ -10,7 +10,7 @@ const MAX_SUBTITLE_CUES = 12000;
 
 function timestampToSeconds(value) {
   const normalized = String(value || "").trim().replace(",", ".");
-  const match = normalized.match(/^(?:(\d{1,2}):(\d{2}):(\d{2})|(\d{2}):(\d{2}))\\.(\d{1,3})$/);
+  const match = normalized.match(/^(?:(\d{1,2}):(\d{2}):(\d{2})|(\d{2}):(\d{2}))\.(\d{1,3})$/);
   if (!match) return NaN;
   const hours = match[1] === undefined ? 0 : Number(match[1]);
   const minutes = Number(match[1] === undefined ? match[4] : match[2]);
