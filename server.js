@@ -9,7 +9,7 @@ import dotenv from "dotenv";
 import crypto from "crypto";
 import { assembleGeneratedVideos } from "./ai-video-assembly.js";
 import { registerSocialOAuth } from "./social-oauth.js";
-import { parseSubtitleText, serializeSubtitleText, inspectSubtitleStreams, extractSubtitleStream, removeSubtitleStreams } from "./subtitle-tools.js";
+import { parseSubtitleText, serializeSubtitleText, inspectSubtitleStreams, extractSubtitleStream, removeSubtitleStreams, replaceBurnedInSubtitles } from "./subtitle-tools.js";
 
 dotenv.config();
 
@@ -1097,6 +1097,39 @@ app.post("/api/subtitles/remove-tracks", limit("subtitle-remove-tracks", 4, 60 *
     if (result) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});
     console.error("Subtitle track removal:", error.message);
     if (!res.headersSent) res.status(422).json({ error: error.message || "Impossible de retirer les pistes de sous-titres." });
+  }
+});
+
+// Remplace les sous-titres incrustés dans l'image, sans modifier le fichier source.
+app.post("/api/subtitles/replace-burned", limit("subtitle-replace-burned", 3, 60 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
+  const input = req.file;
+  let result = null;
+  if (!input) return res.status(400).json({ error: "Importez une vidéo (200 Mo maximum)." });
+  try {
+    let cues, region, style;
+    try {
+      cues = JSON.parse(String(req.body?.cues || "[]"));
+      region = JSON.parse(String(req.body?.region || "{}"));
+      style = JSON.parse(String(req.body?.style || "{}"));
+    } catch (_) {
+      throw new Error("Paramètres de sous-titres invalides.");
+    }
+    result = await replaceBurnedInSubtitles(input.path, cues, region, style);
+    res.set({
+      "Content-Type": "video/mp4",
+      "Content-Length": String(result.size),
+      "Content-Disposition": 'attachment; filename="justevivo-sous-titres-remplaces.mp4"',
+      "X-JV-SUBTITLE-CUES": String(result.cues)
+    });
+    res.sendFile(result.outputPath, () => {
+      fs.unlink(input.path, () => {});
+      if (result) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});
+    });
+  } catch (error) {
+    fs.unlink(input.path, () => {});
+    if (result) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});
+    console.error("Burned-in subtitle replacement:", error.message);
+    if (!res.headersSent) res.status(422).json({ error: error.message || "Le remplacement des sous-titres a échoué." });
   }
 });
 
