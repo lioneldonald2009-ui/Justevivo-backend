@@ -137,6 +137,52 @@ export async function extractSubtitleStream(inputPath, streamIndex, format = "sr
 }
 
 
+// Extraction d'images représentatives pour la reconnaissance OCR des sous-titres incrustés.
+export async function extractFramesForSubtitleOcr(inputPath, options = {}) {
+  if (!ffmpegPath) throw new Error("FFmpeg n'est pas disponible.");
+  const probe = await run(ffmpegPath, ["-hide_banner", "-i", inputPath]).catch(error => {
+    const log = String(error.message || "");
+    if (/Duration:/.test(log)) return log;
+    throw error;
+  });
+  const durationMatch = probe.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+  const sizeMatch = probe.match(/,\s*(\d{2,5})x(\d{2,5})(?:[\s,])/);
+  if (!durationMatch || !sizeMatch) throw new Error("Impossible de lire la durée ou les dimensions de la vidéo.");
+  const duration = Number(durationMatch[1])*3600 + Number(durationMatch[2])*60 + Number(durationMatch[3]);
+  if (!Number.isFinite(duration) || duration <= 0 || duration > 1800) {
+    throw new Error("L'analyse OCR accepte les vidéos de 30 minutes maximum.");
+  }
+  const maxFrames = Math.max(30, Math.min(450, Number(options.maxFrames) || 360));
+  const fps = Math.min(0.8, maxFrames / duration);
+  const interval = 1 / fps;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jv-subtitle-ocr-"));
+  const pattern = path.join(dir, "frame-%05d.jpg");
+  try {
+    await run(ffmpegPath, [
+      "-y", "-hide_banner", "-i", inputPath, "-an", "-sn",
+      "-vf", "fps=" + fps.toFixed(5) + ",scale='min(1280,iw)':-2",
+      "-q:v", "5", "-frames:v", String(maxFrames), pattern
+    ], 5 * 60 * 1000);
+    const files = fs.readdirSync(dir).filter(name => /^frame-\d+\.jpg$/.test(name)).sort();
+    if (!files.length) throw new Error("Aucune image exploitable n'a été extraite de la vidéo.");
+    return {
+      dir,
+      duration,
+      width: Number(sizeMatch[1]),
+      height: Number(sizeMatch[2]),
+      fps,
+      interval,
+      frames: files.map((name, index) => ({
+        path: path.join(dir, name),
+        time: Math.min(duration, index / fps)
+      }))
+    };
+  } catch (error) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 // Remplacement de sous-titres incrustés (pixels) : nettoyage local du bandeau
 // avec FFmpeg delogo, puis rendu des nouveaux textes aux minutages fournis.
 // La zone est volontairement choisie par l'utilisateur pour éviter d'effacer
