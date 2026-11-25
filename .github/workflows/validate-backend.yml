@@ -15,7 +15,7 @@ jobs:
         with:
           node-version: 22
       - name: Install dependencies
-        run: npm ci
+        run: npm install --no-audit --no-fund
       - name: Run subtitle utility tests
         run: npm test
       - name: Check backend JavaScript syntax
