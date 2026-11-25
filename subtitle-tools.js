@@ -135,3 +135,74 @@ export async function extractSubtitleStream(inputPath, streamIndex, format = "sr
     throw error;
   }
 }
+
+
+// Remplacement de sous-titres incrustés (pixels) : nettoyage local du bandeau
+// avec FFmpeg delogo, puis rendu des nouveaux textes aux minutages fournis.
+// La zone est volontairement choisie par l'utilisateur pour éviter d'effacer
+// une partie de l'image par une détection OCR incertaine.
+export async function replaceBurnedInSubtitles(inputPath, cues, region, options = {}) {
+  if (!ffmpegPath) throw new Error("FFmpeg n'est pas disponible.");
+  if (!Array.isArray(cues) || !cues.length || cues.length > 12000) {
+    throw new Error("Ajoutez au moins un sous-titre valide (12 000 maximum).");
+  }
+  const xPct = Number(region?.x), yPct = Number(region?.y);
+  const wPct = Number(region?.width), hPct = Number(region?.height);
+  if (![xPct,yPct,wPct,hPct].every(Number.isFinite) ||
+      xPct < 0 || yPct < 0 || wPct <= 0 || hPct <= 0 ||
+      xPct + wPct > 1 || yPct + hPct > 1 || wPct > 0.95 || hPct > 0.5) {
+    throw new Error("Zone invalide. Définissez x, y, largeur et hauteur entre 0 et 100 %.");
+  }
+  const color = /^#[0-9a-f]{6}$/i.test(String(options.color || "")) ? options.color : "#ffffff";
+  const boxColor = /^#[0-9a-f]{6}$/i.test(String(options.boxColor || "")) ? options.boxColor : "#000000";
+  const opacity = Math.max(0, Math.min(1, Number(options.boxOpacity ?? 0.55)));
+  const probe = await run(ffmpegPath, ["-hide_banner", "-i", inputPath]).catch(error => {
+    const log = String(error.message || "");
+    if (/Duration:/.test(log)) return log;
+    throw error;
+  });
+  const durationMatch = probe.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+  const sizeMatch = probe.match(/,\s*(\d{2,5})x(\d{2,5})(?:[\s,])/);
+  if (!durationMatch || !sizeMatch) throw new Error("Impossible de lire les dimensions ou la durée de la vidéo.");
+  const duration = Number(durationMatch[1])*3600 + Number(durationMatch[2])*60 + Number(durationMatch[3]);
+  const width = Number(sizeMatch[1]), height = Number(sizeMatch[2]);
+  if (!Number.isFinite(duration) || duration <= 0 || duration > 1800) throw new Error("La vidéo doit durer au maximum 30 minutes.");
+  const x = Math.round(width*xPct), y = Math.round(height*yPct);
+  const w = Math.max(24, Math.round(width*wPct)), h = Math.max(18, Math.round(height*hPct));
+  if (x+w > width || y+h > height) throw new Error("La zone dépasse les dimensions de la vidéo.");
+  const cleanCues = cues.map(c => ({
+    start:Number(c.start), end:Number(c.end), text:String(c.text || "").trim().slice(0,1000)
+  })).filter(c => Number.isFinite(c.start) && Number.isFinite(c.end) &&
+    c.start >= 0 && c.end > c.start && c.end <= duration + 0.25 && c.text);
+  if (!cleanCues.length) throw new Error("Aucun sous-titre avec un texte et un minutage valides.");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jv-burned-subtitles-"));
+  const outputPath = path.join(dir, "justevivo-sous-titres-remplaces.mp4");
+  try {
+    const filters = [];
+    filters.push("[0:v]delogo=x="+x+":y="+y+":w="+w+":h="+h+":show=0[clean0]");
+    let previous = "clean0";
+    cleanCues.forEach((cue,i) => {
+      const textPath = path.join(dir, "cue-"+i+".txt");
+      fs.writeFileSync(textPath, cue.text.replace(/\r/g,""), "utf8");
+      const next = "caption"+i;
+      const escapedPath = textPath.replace(/\\/g,"/").replace(/:/g,"\\:");
+      const fontSize = Math.max(14, Math.round(h*0.38));
+      const fontColor = color.slice(1);
+      const bgColor = boxColor.slice(1);
+      filters.push("["+previous+"]drawtext=textfile='"+escapedPath+"':fontcolor=0x"+fontColor+":fontsize="+fontSize+
+        ":x="+(x+Math.round(w*0.04))+":y="+(y+Math.round(h*0.18))+
+        ":box=1:boxcolor=0x"+bgColor+"@"+opacity.toFixed(2)+":boxborderw=8:line_spacing=4:fix_bounds=1"+
+        ":enable='between(t,"+cue.start.toFixed(3)+","+cue.end.toFixed(3)+")'["+next+"]");
+      previous = next;
+    });
+    await run(ffmpegPath, ["-y","-hide_banner","-i",inputPath,"-filter_complex",filters.join(";"),
+      "-map","["+previous+"]","-map","0:a?","-c:v","libx264","-preset","veryfast","-crf","22",
+      "-pix_fmt","yuv420p","-c:a","aac","-b:a","160k","-movflags","+faststart",outputPath], 20*60*1000);
+    const stat = fs.statSync(outputPath);
+    if (!stat.size) throw new Error("Le rendu vidéo est vide.");
+    return { outputPath, outputDir:dir, size:stat.size, duration, width, height, cues:cleanCues.length };
+  } catch(error) {
+    fs.rmSync(dir,{recursive:true,force:true});
+    throw error;
+  }
+}
