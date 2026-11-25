@@ -9,12 +9,13 @@ const MAX_SUBTITLE_BYTES = 5 * 1024 * 1024;
 const MAX_SUBTITLE_CUES = 12000;
 
 function timestampToSeconds(value) {
-  const match = String(value || "").trim().replace(",", ".").match(/^(?:(\d{1,2}):)?(\d{2}):(\d{2})\.(\d{1,3})$/);
+  const normalized = String(value || "").trim().replace(",", ".");
+  const match = normalized.match(/^(?:(\\d{1,2}):(\\d{2}):(\\d{2})|(\\d{2}):(\\d{2}))\\.(\\d{1,3})$/);
   if (!match) return NaN;
-  const hours = Number(match[1] || 0);
-  const minutes = Number(match[2]);
-  const seconds = Number(match[3]);
-  const millis = Number((match[4] + "00").slice(0, 3));
+  const hours = match[1] === undefined ? 0 : Number(match[1]);
+  const minutes = Number(match[1] === undefined ? match[4] : match[2]);
+  const seconds = Number(match[1] === undefined ? match[5] : match[3]);
+  const millis = Number((match[6] + "00").slice(0, 3));
   if (minutes > 59 || seconds > 59) return NaN;
   return hours * 3600 + minutes * 60 + seconds + millis / 1000;
 }
