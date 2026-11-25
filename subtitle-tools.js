@@ -255,12 +255,12 @@ export async function replaceBurnedInSubtitles(inputPath, cues, region, options 
       const cue = cleanCues[i];
       const lines = wrapText(cue.text, maxChars);
       const totalHeight = lines.length * lineHeight;
-      const firstBaseline = y + Math.max(fontSize, Math.round((h-totalHeight)/2) + fontSize);
+      const firstBaseline = Math.max(fontSize, Math.round((h-totalHeight)/2) + fontSize);
       const tspans = lines.map((line,index) =>
-        "<tspan x='" + (x + w/2) + "' y='" + (firstBaseline + index*lineHeight) + "'>" + escapeXml(line) + "</tspan>"
+        "<tspan x='" + (w/2) + "' y='" + (firstBaseline + index*lineHeight) + "'>" + escapeXml(line) + "</tspan>"
       ).join("");
-      const svg = "<svg xmlns='http://www.w3.org/2000/svg' width='" + width + "' height='" + height + "' viewBox='0 0 " + width + " " + height + "'>" +
-        "<rect x='" + x + "' y='" + y + "' width='" + w + "' height='" + h + "' rx='4' fill='" + boxColor + "' fill-opacity='" + opacity.toFixed(2) + "'/>" +
+      const svg = "<svg xmlns='http://www.w3.org/2000/svg' width='" + w + "' height='" + h + "' viewBox='0 0 " + w + " " + h + "'>" +
+        "<rect x='0' y='0' width='" + w + "' height='" + h + "' rx='4' fill='" + boxColor + "' fill-opacity='" + opacity.toFixed(2) + "'/>" +
         "<text font-family='Arial, sans-serif' font-size='" + fontSize + "' font-weight='600' fill='" + color + "' text-anchor='middle'>" + tspans + "</text></svg>";
       const overlayPath = path.join(dir, "caption-" + i + ".png");
       await sharp(Buffer.from(svg)).png().toFile(overlayPath);
@@ -268,7 +268,7 @@ export async function replaceBurnedInSubtitles(inputPath, cues, region, options 
       const overlayLabel = "ov" + i;
       const next = "caption" + i;
       filters.push("[" + (i + 1) + ":v]format=rgba[" + overlayLabel + "]");
-      filters.push("[" + previous + "][" + overlayLabel + "]overlay=0:0:eof_action=pass:enable='between(t," +
+      filters.push("[" + previous + "][" + overlayLabel + "]overlay=" + x + ":" + y + ":eof_action=pass:enable='between(t," +
         cue.start.toFixed(3) + "," + cue.end.toFixed(3) + ")'[" + next + "]");
       previous = next;
     }
