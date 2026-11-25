@@ -251,7 +251,8 @@ export async function replaceBurnedInSubtitles(inputPath, cues, region, options 
     const eraseWindow = cleanCues.map(c => "between(t,"+c.start.toFixed(3)+","+c.end.toFixed(3)+")").join("+");
     filters.push("[0:v]delogo=x="+x+":y="+y+":w="+w+":h="+h+":show=0:enable='" + eraseWindow + "'[clean0]");
     let previous = "clean0";
-    cleanCues.forEach((cue,i) => {
+    for (let i = 0; i < cleanCues.length; i++) {
+      const cue = cleanCues[i];
       const lines = wrapText(cue.text, maxChars);
       const totalHeight = lines.length * lineHeight;
       const firstBaseline = y + Math.max(fontSize, Math.round((h-totalHeight)/2) + fontSize);
@@ -262,28 +263,15 @@ export async function replaceBurnedInSubtitles(inputPath, cues, region, options 
         "<rect x='" + x + "' y='" + y + "' width='" + w + "' height='" + h + "' rx='4' fill='" + boxColor + "' fill-opacity='" + opacity.toFixed(2) + "'/>" +
         "<text font-family='Arial, sans-serif' font-size='" + fontSize + "' font-weight='600' fill='" + color + "' text-anchor='middle'>" + tspans + "</text></svg>";
       const overlayPath = path.join(dir, "caption-" + i + ".png");
-      sharp(Buffer.from(svg)).png().toFile(overlayPath);
+      await sharp(Buffer.from(svg)).png().toFile(overlayPath);
       args.push("-loop","1","-framerate","30","-i",overlayPath);
-      const overlayInput = i + 1;
       const overlayLabel = "ov" + i;
       const next = "caption" + i;
-      filters.push("[" + overlayInput + ":v]format=rgba[" + overlayLabel + "]");
+      filters.push("[" + (i + 1) + ":v]format=rgba[" + overlayLabel + "]");
       filters.push("[" + previous + "][" + overlayLabel + "]overlay=0:0:eof_action=pass:enable='between(t," +
         cue.start.toFixed(3) + "," + cue.end.toFixed(3) + ")'[" + next + "]");
       previous = next;
-    });
-    await Promise.all(cleanCues.map(async (cue,i) => {
-      const lines = wrapText(cue.text, maxChars);
-      const totalHeight = lines.length * lineHeight;
-      const firstBaseline = y + Math.max(fontSize, Math.round((h-totalHeight)/2) + fontSize);
-      const tspans = lines.map((line,index) =>
-        "<tspan x='" + (x + w/2) + "' y='" + (firstBaseline + index*lineHeight) + "'>" + escapeXml(line) + "</tspan>"
-      ).join("");
-      const svg = "<svg xmlns='http://www.w3.org/2000/svg' width='" + width + "' height='" + height + "' viewBox='0 0 " + width + " " + height + "'>" +
-        "<rect x='" + x + "' y='" + y + "' width='" + w + "' height='" + h + "' rx='4' fill='" + boxColor + "' fill-opacity='" + opacity.toFixed(2) + "'/>" +
-        "<text font-family='Arial, sans-serif' font-size='" + fontSize + "' font-weight='600' fill='" + color + "' text-anchor='middle'>" + tspans + "</text></svg>";
-      await sharp(Buffer.from(svg)).png().toFile(path.join(dir, "caption-" + i + ".png"));
-    }));
+    }
     args.push("-filter_complex",filters.join(";"),"-map","["+previous+"]","-map","0:a?","-c:v","libx264",
       "-preset","veryfast","-crf","22","-pix_fmt","yuv420p","-c:a","aac","-b:a","160k","-movflags","+faststart",outputPath);
     await run(ffmpegPath,args,20*60*1000);
