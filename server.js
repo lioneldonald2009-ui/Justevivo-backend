@@ -1043,6 +1043,7 @@ async function processSubtitleOcrVideo(inputPath) {
       });
       const completion = await groq.chat.completions.create({
         model: "qwen/qwen3.8-27b",
+        timeout: 20 * 60 * 1000,
         messages: [{ role: "user", content: contentParts }],
         temperature: 0,
         max_completion_tokens: 2200,
