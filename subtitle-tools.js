@@ -143,8 +143,8 @@ export async function extractSubtitleStream(inputPath, streamIndex, format = "sr
 // une partie de l'image par une détection OCR incertaine.
 export async function replaceBurnedInSubtitles(inputPath, cues, region, options = {}) {
   if (!ffmpegPath) throw new Error("FFmpeg n'est pas disponible.");
-  if (!Array.isArray(cues) || !cues.length || cues.length > 12000) {
-    throw new Error("Ajoutez au moins un sous-titre valide (12 000 maximum).");
+  if (!Array.isArray(cues) || !cues.length || cues.length > 300) {
+    throw new Error("Ajoutez au moins un sous-titre valide (300 maximum).");
   }
   const xPct = Number(region?.x), yPct = Number(region?.y);
   const wPct = Number(region?.width), hPct = Number(region?.height);
