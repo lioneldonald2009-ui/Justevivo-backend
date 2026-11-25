@@ -162,7 +162,7 @@ export async function extractFramesForSubtitleOcr(inputPath, options = {}) {
       "-y", "-hide_banner", "-i", inputPath, "-an", "-sn",
       "-vf", "fps=" + fps.toFixed(5) + ",scale='min(1280,iw)':-2",
       "-q:v", "5", "-frames:v", String(maxFrames), pattern
-    ], 5 * 60 * 1000);
+    ], 60 * 60 * 1000);
     const files = fs.readdirSync(dir).filter(name => /^frame-\d+\.jpg$/.test(name)).sort();
     if (!files.length) throw new Error("Aucune image exploitable n'a été extraite de la vidéo.");
     return {
