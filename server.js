@@ -9,6 +9,7 @@ import dotenv from "dotenv";
 import crypto from "crypto";
 import { assembleGeneratedVideos } from "./ai-video-assembly.js";
 import { registerSocialOAuth } from "./social-oauth.js";
+import { parseSubtitleText, serializeSubtitleText, inspectSubtitleStreams, extractSubtitleStream } from "./subtitle-tools.js";
 
 dotenv.config();
 
@@ -416,6 +417,17 @@ const upload = multer({
       return cb(error);
     }
 
+    cb(null, true);
+  }
+});
+
+// Import SRT/VTT séparé : limite volontairement plus basse que les médias vidéo.
+const uploadSubtitleFile = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024, files: 1 },
+  fileFilter(req, file, cb) {
+    const ext = path.extname(String(file.originalname || "")).toLowerCase();
+    if (![".srt", ".vtt"].includes(ext)) return cb(new Error("Importez un fichier .SRT ou .VTT."));
     cb(null, true);
   }
 });
@@ -991,6 +1003,78 @@ app.post(
     }
   }
 );
+
+// ===== Gestion indépendante des sous-titres existants =====
+app.post("/api/subtitles/parse", limit("subtitle-parse", 20, 10 * 60 * 1000), requireUser, (req, res) => {
+  try {
+    const parsed = parseSubtitleText(req.body?.content, req.body?.format || "auto");
+    res.json({ success: true, ...parsed });
+  } catch (error) {
+    res.status(422).json({ error: error.message || "Fichier de sous-titres invalide." });
+  }
+});
+
+app.post("/api/subtitles/import", limit("subtitle-import", 12, 10 * 60 * 1000), requireUser, uploadSubtitleFile.single("subtitle"), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Sélectionnez un fichier SRT ou VTT." });
+  try {
+    const content = fs.readFileSync(req.file.path, "utf8");
+    const parsed = parseSubtitleText(content, path.extname(req.file.originalname).slice(1));
+    fs.unlink(req.file.path, () => {});
+    res.json({ success: true, fileName: req.file.originalname, ...parsed });
+  } catch (error) {
+    fs.unlink(req.file.path, () => {});
+    res.status(422).json({ error: error.message || "Impossible de lire ce fichier." });
+  }
+});
+
+app.post("/api/subtitles/export", limit("subtitle-export", 20, 10 * 60 * 1000), requireUser, (req, res) => {
+  try {
+    const format = String(req.body?.format || "srt").toLowerCase();
+    if (!["srt", "vtt"].includes(format)) return res.status(400).json({ error: "Format d'export non pris en charge." });
+    const content = serializeSubtitleText(req.body?.cues, format);
+    res.set({ "Content-Type": format === "vtt" ? "text/vtt; charset=utf-8" : "application/x-subrip; charset=utf-8" });
+    res.send(content);
+  } catch (error) {
+    res.status(422).json({ error: error.message || "Impossible de générer le fichier de sous-titres." });
+  }
+});
+
+app.post("/api/subtitles/inspect-video", limit("subtitle-inspect", 8, 10 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Importez une vidéo." });
+  try {
+    const result = await inspectSubtitleStreams(req.file.path);
+    res.json({
+      success: true,
+      ...result,
+      visualSubtitleCheck: "manual-review-required",
+      note: result.hasSubtitleTracks
+        ? "Des pistes de sous-titres séparées ont été détectées. Les textes incrustés dans l'image nécessitent une analyse visuelle distincte."
+        : "Aucune piste séparée détectée. Des sous-titres peuvent néanmoins être incrustés dans l'image : vérifiez l'aperçu."
+    });
+  } catch (error) {
+    res.status(422).json({ error: error.message || "Impossible d'analyser les pistes de cette vidéo." });
+  } finally {
+    fs.unlink(req.file.path, () => {});
+  }
+});
+
+app.post("/api/subtitles/extract-track", limit("subtitle-extract", 8, 10 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Importez une vidéo." });
+  let extracted = null;
+  try {
+    const trackIndex = Number(req.body?.streamIndex);
+    extracted = await extractSubtitleStream(req.file.path, trackIndex, req.body?.format || "srt");
+    const ext = path.extname(extracted.outputPath);
+    res.download(extracted.outputPath, "justevivo-subtitles" + ext, () => {
+      fs.unlink(req.file.path, () => {});
+      if (extracted) fs.rm(extracted.outputDir, { recursive: true, force: true }, () => {});
+    });
+  } catch (error) {
+    fs.unlink(req.file.path, () => {});
+    if (extracted) fs.rm(extracted.outputDir, { recursive: true, force: true }, () => {});
+    res.status(422).json({ error: error.message || "Impossible d'extraire cette piste." });
+  }
+});
 
 // ===== Nettoyage des hésitations et détection des répétitions =====
 app.post("/api/video/remove-fillers", limit("filler-cut", 3, 60 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
