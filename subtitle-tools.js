@@ -179,7 +179,8 @@ export async function replaceBurnedInSubtitles(inputPath, cues, region, options 
   const outputPath = path.join(dir, "justevivo-sous-titres-remplaces.mp4");
   try {
     const filters = [];
-    filters.push("[0:v]delogo=x="+x+":y="+y+":w="+w+":h="+h+":show=0[clean0]");
+    const eraseWindow = cleanCues.map(c => "between(t,"+c.start.toFixed(3)+","+c.end.toFixed(3)+")").join("+");
+    filters.push("[0:v]delogo=x="+x+":y="+y+":w="+w+":h="+h+":show=0:enable='" + eraseWindow + "'[clean0]");
     let previous = "clean0";
     cleanCues.forEach((cue,i) => {
       const textPath = path.join(dir, "cue-"+i+".txt");
