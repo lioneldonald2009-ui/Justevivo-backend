@@ -1005,6 +1005,51 @@ app.post(
 );
 
 // ===== Gestion indépendante des sous-titres existants =====
+// Analyse automatique : priorité aux pistes intégrées, sinon transcription audio Whisper.
+app.post("/api/subtitles/analyze-video", limit("subtitle-analyze-video", 5, 60 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
+  const input = req.file;
+  if (!input) return res.status(400).json({ error: "Importez une vidéo (200 Mo maximum)." });
+  let audio = null;
+  let extracted = null;
+  try {
+    const tracks = await inspectSubtitleStreams(input.path);
+    if (tracks.streams.length) {
+      const first = tracks.streams[0];
+      extracted = await extractSubtitleStream(input.path, first.index, "srt");
+      const parsed = parseSubtitleText(fs.readFileSync(extracted.outputPath, "utf8"), "srt");
+      return res.json({ success: true, source: "embedded-track", language: first.language, cues: parsed.cues, count: parsed.cues.length,
+        note: "Piste intégrée détectée et extraite. Vous pouvez modifier ou supprimer chaque phrase." });
+    }
+    if (!process.env.GROQ_API_KEY) return res.status(503).json({ error: "Aucune piste intégrée détectée. Le moteur de transcription Groq n'est pas configuré." });
+    audio = await extractCompressedAudio(input.path);
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const transcript = await groq.audio.transcriptions.create({
+      file: fs.createReadStream(audio.outputPath), model: "whisper-large-v3-turbo",
+      response_format: "verbose_json", timestamp_granularities: ["segment"]
+    });
+    let cues = (transcript.segments || []).map(segment => ({
+      start: Number(segment.start), end: Number(segment.end), text: String(segment.text || "").trim()
+    })).filter(cue => Number.isFinite(cue.start) && Number.isFinite(cue.end) && cue.end > cue.start && cue.text);
+    if (!cues.length && transcript.text) cues = [{ start: 0, end: Number(transcript.duration) || 5, text: String(transcript.text).trim() }];
+    if (!cues.length) return res.status(422).json({ error: "Aucune parole exploitable n'a été détectée." });
+    try { cues = await correctTranscriptSegments(groq, cues, transcript.language); }
+    catch (e) { console.warn("Correction des sous-titres ignorée :", e.message); }
+    await sbInsert("usage", { user_id: req.user.id, job_id: "sub" + Date.now() + Math.random().toString(36).slice(2, 7),
+      kind: "transcribe", seconds: Number(transcript.duration) || cues[cues.length - 1].end });
+    return res.json({ success: true, source: "audio-transcription", language: transcript.language || null,
+      duration: Number(transcript.duration) || null, cues, count: cues.length,
+      note: "Transcription audio terminée. Les phrases sont horodatées et modifiables. Les sous-titres incrustés dans l'image nécessitent une reconnaissance OCR visuelle distincte." });
+  } catch (error) {
+    console.error("Subtitle video analysis:", error.message);
+    return res.status(422).json({ error: error.message || "L'analyse de la vidéo a échoué." });
+  } finally {
+    fs.unlink(input.path, () => {});
+    if (audio?.outputDir) fs.rm(audio.outputDir, { recursive: true, force: true }, () => {});
+    if (extracted?.outputDir) fs.rm(extracted.outputDir, { recursive: true, force: true }, () => {});
+  }
+});
+
+
 app.post("/api/subtitles/parse", limit("subtitle-parse", 20, 10 * 60 * 1000), requireUser, (req, res) => {
   try {
     const parsed = parseSubtitleText(req.body?.content, req.body?.format || "auto");
