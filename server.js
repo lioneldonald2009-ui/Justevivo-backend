@@ -1085,7 +1085,7 @@ app.post("/api/subtitles/remove-tracks", limit("subtitle-remove-tracks", 4, 60 *
     res.set({
       "Content-Type": req.file.mimetype || "application/octet-stream",
       "Content-Length": String(result.size),
-      "Content-Disposition": 'attachment; filename="justevivo-video-sans-sous-titres' + '"+ext+'"',
+      "Content-Disposition": `attachment; filename="justevivo-video-sans-sous-titres${ext}"`,
       "X-JV-SUBTITLE-TRACKS-REMOVED": "true"
     });
     res.sendFile(result.outputPath, () => {
