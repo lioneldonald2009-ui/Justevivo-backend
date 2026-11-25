@@ -9,7 +9,7 @@ import dotenv from "dotenv";
 import crypto from "crypto";
 import { assembleGeneratedVideos } from "./ai-video-assembly.js";
 import { registerSocialOAuth } from "./social-oauth.js";
-import { parseSubtitleText, serializeSubtitleText, inspectSubtitleStreams, extractSubtitleStream, removeSubtitleStreams, replaceBurnedInSubtitles } from "./subtitle-tools.js";
+import { parseSubtitleText, serializeSubtitleText, inspectSubtitleStreams, extractSubtitleStream, removeSubtitleStreams, replaceBurnedInSubtitles, extractFramesForSubtitleOcr } from "./subtitle-tools.js";
 
 dotenv.config();
 
@@ -1005,47 +1005,146 @@ app.post(
 );
 
 // ===== Gestion indépendante des sous-titres existants =====
-// Analyse automatique : priorité aux pistes intégrées, sinon transcription audio Whisper.
+// Analyse visuelle OCR : lit les textes déjà incrustés dans les pixels, sans utiliser l'audio.
 app.post("/api/subtitles/analyze-video", limit("subtitle-analyze-video", 5, 60 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
   const input = req.file;
   if (!input) return res.status(400).json({ error: "Importez une vidéo (200 Mo maximum)." });
-  let audio = null;
-  let extracted = null;
+  let extractedFrames = null;
   try {
-    const tracks = await inspectSubtitleStreams(input.path);
-    if (tracks.streams.length) {
-      const first = tracks.streams[0];
-      extracted = await extractSubtitleStream(input.path, first.index, "srt");
-      const parsed = parseSubtitleText(fs.readFileSync(extracted.outputPath, "utf8"), "srt");
-      return res.json({ success: true, source: "embedded-track", language: first.language, cues: parsed.cues, count: parsed.cues.length,
-        note: "Piste intégrée détectée et extraite. Vous pouvez modifier ou supprimer chaque phrase." });
+    if (!process.env.GROQ_API_KEY) {
+      return res.status(503).json({ error: "Le moteur OCR visuel n'est pas configuré : clé Groq manquante." });
     }
-    if (!process.env.GROQ_API_KEY) return res.status(503).json({ error: "Aucune piste intégrée détectée. Le moteur de transcription Groq n'est pas configuré." });
-    audio = await extractCompressedAudio(input.path);
+    extractedFrames = await extractFramesForSubtitleOcr(input.path, { maxFrames: 360 });
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-    const transcript = await groq.audio.transcriptions.create({
-      file: fs.createReadStream(audio.outputPath), model: "whisper-large-v3-turbo",
-      response_format: "verbose_json", timestamp_granularities: ["segment"]
+    const detections = [];
+    const frameGroups = [];
+    for (let i = 0; i < extractedFrames.frames.length; i += 3) {
+      frameGroups.push(extractedFrames.frames.slice(i, i + 3));
+    }
+
+    for (const group of frameGroups) {
+      const contentParts = [{
+        type: "text",
+        text: [
+          "Tâche OCR vidéo : lis UNIQUEMENT les sous-titres ou légendes textuelles incrustés dans les pixels de chaque image.",
+          "N'utilise aucune parole ni transcription audio. Ignore les logos, filigranes, titres décoratifs, panneaux, textes d'interface et éléments de décor.",
+          "Pour chaque image, utilise son numéro et son horodatage indiqués juste avant l'image.",
+          "Réponds en JSON strict sous la forme : {\"frames\":[{\"i\":0,\"lines\":[{\"text\":\"texte exact\",\"box\":[x,y,w,h]}]}]}.",
+          "i doit être le numéro d'image fourni. box est le rectangle normalisé de la zone du sous-titre dans l'image (x, y, largeur, hauteur), valeurs entre 0 et 1.",
+          "Conserve exactement l'orthographe, la casse, la ponctuation et la langue visibles. Ne reformule pas. Si aucun sous-titre n'est visible dans une image, renvoie lines: [].",
+          "Images de ce lot :"
+        ].join("\n")
+      }];
+      group.forEach((frame, localIndex) => {
+        const globalIndex = extractedFrames.frames.indexOf(frame);
+        const base64 = fs.readFileSync(frame.path).toString("base64");
+        contentParts.push({ type: "text", text: "Image numéro " + globalIndex + " à " + frame.time.toFixed(2) + " secondes." });
+        contentParts.push({
+          type: "image_url",
+          image_url: { url: "data:image/jpeg;base64," + base64 }
+        });
+      });
+      const completion = await groq.chat.completions.create({
+        model: "qwen/qwen3.8-27b",
+        messages: [{ role: "user", content: contentParts }],
+        temperature: 0,
+        max_completion_tokens: 2200,
+        response_format: { type: "json_object" }
+      });
+      let parsed;
+      const raw = completion.choices?.[0]?.message?.content || "";
+      try { parsed = JSON.parse(raw); }
+      catch (_) {
+        const match = String(raw).match(/\{[\s\S]*\}/);
+        if (!match) throw new Error("Le moteur OCR a renvoyé un résultat illisible.");
+        parsed = JSON.parse(match[0]);
+      }
+      const returnedFrames = Array.isArray(parsed.frames) ? parsed.frames : [];
+      returnedFrames.forEach((item, order) => {
+        const idx = Number.isInteger(Number(item.i)) ? Number(item.i) : (extractedFrames.frames.indexOf(group[0]) + order);
+        const frame = extractedFrames.frames[idx];
+        if (!frame) return;
+        const lines = Array.isArray(item.lines) ? item.lines : [];
+        const validLines = lines.map(line => ({
+          text: String(line.text || "").replace(/\s+/g, " ").trim().slice(0, 1000),
+          box: Array.isArray(line.box) && line.box.length === 4 ? line.box.map(Number) : null
+        })).filter(line => line.text);
+        if (!validLines.length) {
+          detections.push({ time: frame.time, text: "", boxes: [] });
+          return;
+        }
+        detections.push({
+          time: frame.time,
+          text: validLines.map(line => line.text).join("\n"),
+          boxes: validLines.map(line => line.box).filter(box =>
+            box && box.every(Number.isFinite) && box[0] >= 0 && box[1] >= 0 &&
+            box[2] > 0 && box[3] > 0 && box[0] + box[2] <= 1.05 && box[1] + box[3] <= 1.05)
+        });
+      });
+    }
+
+    detections.sort((a, b) => a.time - b.time);
+    const interval = extractedFrames.interval;
+    const cues = [];
+    let active = null;
+    const normalize = value => String(value || "").toLocaleLowerCase().normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+    for (const detection of detections) {
+      const text = detection.text.trim();
+      if (!text) {
+        if (active && detection.time - active.lastSeen > interval * 1.8) {
+          active.end = Math.max(active.start + 0.25, active.lastSeen + interval);
+          cues.push(active);
+          active = null;
+        }
+        continue;
+      }
+      if (active && normalize(active.text) === normalize(text) && detection.time - active.lastSeen <= interval * 2.2) {
+        active.lastSeen = detection.time;
+        active.end = detection.time + interval;
+        active.boxes.push(...detection.boxes);
+      } else {
+        if (active) {
+          active.end = Math.max(active.start + 0.25, active.lastSeen + interval);
+          cues.push(active);
+        }
+        active = { start: Math.max(0, detection.time), end: detection.time + interval,
+          lastSeen: detection.time, text, boxes: [...detection.boxes] };
+      }
+    }
+    if (active) {
+      active.end = Math.min(extractedFrames.duration, Math.max(active.start + 0.25, active.lastSeen + interval));
+      cues.push(active);
+    }
+    const cleanCues = cues.map(({ start, end, text }) => ({ start, end, text }))
+      .filter(cue => cue.text && cue.end > cue.start);
+    if (!cleanCues.length) {
+      return res.status(422).json({
+        error: "Aucun sous-titre incrusté n'a été reconnu. Vérifiez que le texte est lisible et suffisamment visible dans la vidéo."
+      });
+    }
+
+    const allBoxes = cues.flatMap(cue => cue.boxes || []);
+    let region = { x: 0.04, y: 0.72, width: 0.92, height: 0.22 };
+    if (allBoxes.length) {
+      const left = Math.max(0, Math.min(...allBoxes.map(box => box[0])) - 0.025);
+      const top = Math.max(0, Math.min(...allBoxes.map(box => box[1])) - 0.025);
+      const right = Math.min(1, Math.max(...allBoxes.map(box => box[0] + box[2])) + 0.025);
+      const bottom = Math.min(1, Math.max(...allBoxes.map(box => box[1] + box[3])) + 0.035);
+      region = { x: left, y: top, width: Math.min(0.95, right - left), height: Math.min(0.45, bottom - top) };
+    }
+    res.json({
+      success: true, source: "visual-ocr", duration: extractedFrames.duration,
+      frameCount: extractedFrames.frames.length, sampleInterval: interval,
+      cues: cleanCues, count: cleanCues.length, region,
+      note: "Sous-titres visibles détectés par OCR dans les images. Les minutages sont estimés à partir des images échantillonnées ; vérifiez-les avant le rendu."
     });
-    let cues = (transcript.segments || []).map(segment => ({
-      start: Number(segment.start), end: Number(segment.end), text: String(segment.text || "").trim()
-    })).filter(cue => Number.isFinite(cue.start) && Number.isFinite(cue.end) && cue.end > cue.start && cue.text);
-    if (!cues.length && transcript.text) cues = [{ start: 0, end: Number(transcript.duration) || 5, text: String(transcript.text).trim() }];
-    if (!cues.length) return res.status(422).json({ error: "Aucune parole exploitable n'a été détectée." });
-    try { cues = await correctTranscriptSegments(groq, cues, transcript.language); }
-    catch (e) { console.warn("Correction des sous-titres ignorée :", e.message); }
-    await sbInsert("usage", { user_id: req.user.id, job_id: "sub" + Date.now() + Math.random().toString(36).slice(2, 7),
-      kind: "transcribe", seconds: Number(transcript.duration) || cues[cues.length - 1].end });
-    return res.json({ success: true, source: "audio-transcription", language: transcript.language || null,
-      duration: Number(transcript.duration) || null, cues, count: cues.length,
-      note: "Transcription audio terminée. Les phrases sont horodatées et modifiables. Les sous-titres incrustés dans l'image nécessitent une reconnaissance OCR visuelle distincte." });
   } catch (error) {
-    console.error("Subtitle video analysis:", error.message);
-    return res.status(422).json({ error: error.message || "L'analyse de la vidéo a échoué." });
+    console.error("Erreur OCR sous-titres incrustés :", error.message);
+    res.status(422).json({ error: error.message || "La reconnaissance visuelle des sous-titres a échoué." });
   } finally {
     fs.unlink(input.path, () => {});
-    if (audio?.outputDir) fs.rm(audio.outputDir, { recursive: true, force: true }, () => {});
-    if (extracted?.outputDir) fs.rm(extracted.outputDir, { recursive: true, force: true }, () => {});
+    if (extractedFrames?.dir) fs.rm(extractedFrames.dir, { recursive: true, force: true }, () => {});
   }
 });
 
