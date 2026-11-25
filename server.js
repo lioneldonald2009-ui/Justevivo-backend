@@ -1006,15 +1006,14 @@ app.post(
 
 // ===== Gestion indépendante des sous-titres existants =====
 // Analyse visuelle OCR : lit les textes déjà incrustés dans les pixels, sans utiliser l'audio.
-app.post("/api/subtitles/analyze-video", limit("subtitle-analyze-video", 5, 60 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
-  const input = req.file;
-  if (!input) return res.status(400).json({ error: "Importez une vidéo (200 Mo maximum)." });
+const subtitleOcrJobs = new Map();
+
+async function processSubtitleOcrVideo(inputPath) {
   let extractedFrames = null;
-  try {
-    if (!process.env.GROQ_API_KEY) {
+  try {    if (!process.env.GROQ_API_KEY) {
       return res.status(503).json({ error: "Le moteur OCR visuel n'est pas configuré : clé Groq manquante." });
     }
-    extractedFrames = await extractFramesForSubtitleOcr(input.path, { maxFrames: 360 });
+    extractedFrames = await extractFramesForSubtitleOcr(inputPath, { maxFrames: 360 });
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
     const detections = [];
     const frameGroups = [];
@@ -1119,9 +1118,7 @@ app.post("/api/subtitles/analyze-video", limit("subtitle-analyze-video", 5, 60 *
     const cleanCues = cues.map(({ start, end, text }) => ({ start, end, text }))
       .filter(cue => cue.text && cue.end > cue.start);
     if (!cleanCues.length) {
-      return res.status(422).json({
-        error: "Aucun sous-titre incrusté n'a été reconnu. Vérifiez que le texte est lisible et suffisamment visible dans la vidéo."
-      });
+      throw new Error("Aucun sous-titre incrusté n'a été reconnu. Vérifiez que le texte est lisible et suffisamment visible dans la vidéo.");
     }
 
     const allBoxes = cues.flatMap(cue => cue.boxes || []);
@@ -1133,19 +1130,49 @@ app.post("/api/subtitles/analyze-video", limit("subtitle-analyze-video", 5, 60 *
       const bottom = Math.min(1, Math.max(...allBoxes.map(box => box[1] + box[3])) + 0.035);
       region = { x: left, y: top, width: Math.min(0.95, right - left), height: Math.min(0.45, bottom - top) };
     }
-    res.json({
+    return {
       success: true, source: "visual-ocr", duration: extractedFrames.duration,
       frameCount: extractedFrames.frames.length, sampleInterval: interval,
       cues: cleanCues, count: cleanCues.length, region,
       note: "Sous-titres visibles détectés par OCR dans les images. Les minutages sont estimés à partir des images échantillonnées ; vérifiez-les avant le rendu."
-    });
-  } catch (error) {
-    console.error("Erreur OCR sous-titres incrustés :", error.message);
-    res.status(422).json({ error: error.message || "La reconnaissance visuelle des sous-titres a échoué." });
+    };
+
   } finally {
-    fs.unlink(input.path, () => {});
-    if (extractedFrames?.dir) fs.rm(extractedFrames.dir, { recursive: true, force: true }, () => {});
+    if (extractedFrames?.dir) fs.rmSync(extractedFrames.dir, { recursive: true, force: true });
   }
+}
+
+app.post("/api/subtitles/analyze-video", limit("subtitle-analyze-video", 5, 60 * 60 * 1000), requireUser, upload.single("video"), (req, res) => {
+  const input = req.file;
+  if (!input) return res.status(400).json({ error: "Importez une vidéo (200 Mo maximum)." });
+  if (!process.env.GROQ_API_KEY) {
+    fs.unlink(input.path, () => {});
+    return res.status(503).json({ error: "Le moteur OCR visuel n'est pas configuré : clé Groq manquante." });
+  }
+  const jobId = crypto.randomUUID();
+  const job = { status: "queued", createdAt: Date.now(), result: null, error: null };
+  subtitleOcrJobs.set(jobId, job);
+  while (subtitleOcrJobs.size > 30) {
+    const oldest = subtitleOcrJobs.keys().next().value;
+    if (oldest === jobId) break;
+    const item = subtitleOcrJobs.get(oldest);
+    if (item.status === "processing" || item.status === "queued") break;
+    subtitleOcrJobs.delete(oldest);
+  }
+  res.status(202).json({ success: true, jobId, status: "queued" });
+  job.status = "processing";
+  processSubtitleOcrVideo(input.path)
+    .then(result => { job.result = result; job.status = "completed"; })
+    .catch(error => { console.error("Erreur OCR sous-titres incrustés :", error.message); job.error = error.message || "La reconnaissance visuelle des sous-titres a échoué."; job.status = "failed"; })
+    .finally(() => fs.unlink(input.path, () => {}));
+});
+
+app.get("/api/subtitles/analyze-video/:jobId", requireUser, (req, res) => {
+  const job = subtitleOcrJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: "Analyse introuvable ou expirée. Relancez la détection." });
+  if (job.status === "completed") return res.json({ success: true, status: "completed", ...job.result });
+  if (job.status === "failed") return res.status(422).json({ error: job.error || "La reconnaissance OCR a échoué.", status: "failed" });
+  res.json({ success: true, status: job.status, message: "Analyse OCR en cours…" });
 });
 
 
