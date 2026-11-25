@@ -97,6 +97,27 @@ export async function inspectSubtitleStreams(inputPath) {
   return { streams, hasSubtitleTracks: streams.length > 0 };
 }
 
+export async function removeSubtitleStreams(inputPath) {
+  if (!ffmpegPath) throw new Error("FFmpeg n'est pas disponible.");
+  const ext = path.extname(inputPath).toLowerCase() || ".mp4";
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jv-subtitle-clean-"));
+  const outputPath = path.join(dir, "justevivo-clean-video" + ext);
+  try {
+    await run(ffmpegPath, [
+      "-y", "-hide_banner", "-i", inputPath,
+      "-map", "0", "-map", "-0:s",
+      "-c", "copy", "-map_metadata", "0", outputPath
+    ], 180000);
+    if (!fs.existsSync(outputPath) || !fs.statSync(outputPath).size) {
+      throw new Error("La vidéo sans pistes de sous-titres n'a pas pu être créée.");
+    }
+    return { outputPath, outputDir: dir, size: fs.statSync(outputPath).size };
+  } catch (error) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 export async function extractSubtitleStream(inputPath, streamIndex, format = "srt") {
   if (!ffmpegPath) throw new Error("FFmpeg n'est pas disponible.");
   const index = Number(streamIndex);
