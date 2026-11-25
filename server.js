@@ -1010,9 +1010,7 @@ const subtitleOcrJobs = new Map();
 
 async function processSubtitleOcrVideo(inputPath) {
   let extractedFrames = null;
-  try {    if (!process.env.GROQ_API_KEY) {
-      return res.status(503).json({ error: "Le moteur OCR visuel n'est pas configuré : clé Groq manquante." });
-    }
+  try {
     extractedFrames = await extractFramesForSubtitleOcr(inputPath, { maxFrames: 360 });
     const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
     const detections = [];
