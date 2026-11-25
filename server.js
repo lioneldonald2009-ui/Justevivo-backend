@@ -9,7 +9,7 @@ import dotenv from "dotenv";
 import crypto from "crypto";
 import { assembleGeneratedVideos } from "./ai-video-assembly.js";
 import { registerSocialOAuth } from "./social-oauth.js";
-import { parseSubtitleText, serializeSubtitleText, inspectSubtitleStreams, extractSubtitleStream } from "./subtitle-tools.js";
+import { parseSubtitleText, serializeSubtitleText, inspectSubtitleStreams, extractSubtitleStream, removeSubtitleStreams } from "./subtitle-tools.js";
 
 dotenv.config();
 
@@ -1073,6 +1073,30 @@ app.post("/api/subtitles/extract-track", limit("subtitle-extract", 8, 10 * 60 * 
     fs.unlink(req.file.path, () => {});
     if (extracted) fs.rm(extracted.outputDir, { recursive: true, force: true }, () => {});
     res.status(422).json({ error: error.message || "Impossible d'extraire cette piste." });
+  }
+});
+
+app.post("/api/subtitles/remove-tracks", limit("subtitle-remove-tracks", 4, 60 * 60 * 1000), requireUser, upload.single("video"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Importez une vidéo." });
+  let result = null;
+  try {
+    result = await removeSubtitleStreams(req.file.path);
+    const ext = path.extname(result.outputPath).toLowerCase();
+    res.set({
+      "Content-Type": req.file.mimetype || "application/octet-stream",
+      "Content-Length": String(result.size),
+      "Content-Disposition": 'attachment; filename="justevivo-video-sans-sous-titres' + '"+ext+'"',
+      "X-JV-SUBTITLE-TRACKS-REMOVED": "true"
+    });
+    res.sendFile(result.outputPath, () => {
+      fs.unlink(req.file.path, () => {});
+      if (result) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});
+    });
+  } catch (error) {
+    fs.unlink(req.file.path, () => {});
+    if (result) fs.rm(result.outputDir, { recursive: true, force: true }, () => {});
+    console.error("Subtitle track removal:", error.message);
+    if (!res.headersSent) res.status(422).json({ error: error.message || "Impossible de retirer les pistes de sous-titres." });
   }
 });
 
